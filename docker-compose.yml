@@ -4,6 +4,8 @@ services:
     image: ghcr.io/mrddream/remindervotebot:latest
     container_name: ReminderVoteBot
     restart: unless-stopped
+    command: >
+      sh -c "node src/deploy-commands.js && npm start"
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - CLIENT_ID=${CLIENT_ID}

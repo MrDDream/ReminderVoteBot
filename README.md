@@ -5,7 +5,7 @@
 ![Docker](https://img.shields.io/badge/Docker-ready-0db7ed?style=flat&logo=docker&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Looking for the French documentation? ?? [Consulter la version FR](README.fr.md)
+[Consulter la version FR](README.fr.md)
 
 ReminderVoteBot is a production-ready Discord bot that nudges your community to vote via DMs or channel mentions. Each subscriber can pick custom time windows, time zones, delivery mode, and the vote URL to open. Perfect for Top-Serveurs (and similar) leaderboards where consistent vote cadence matters.
 
@@ -31,7 +31,7 @@ The bot stores subscriptions in `data/subscriptions.json`, keeps vote URL metada
 - Define a daily reminder window (30-minute granularity) and time zone.
 - Choose whether reminders arrive via DM or a dedicated channel ping.
 
-Admins manage everything through Discord slash commands—no manual JSON edits required.
+Admins manage everything through Discord slash commandsï¿½no manual JSON edits required.
 
 ## Key Features
 - Per-user reminders with adjustable windows, time zones, delivery mode, and per-entry cooldowns.
@@ -114,16 +114,16 @@ Notes:
 All interactive components are ephemeral to avoid cluttering public channels.
 
 ## Reminder Lifecycle
-1. **Fine-grained scheduler** – each subscription gets a `node-cron` task that fires every minute in its configured timezone.
-2. **Daily window guard** – reminders trigger only between `window.start` and `window.end`, supporting overnight windows (e.g., 22:00–06:00).
-3. **Per-entry cooldowns** – set `cooldownMinutes` per vote entry (default 120). Timers consider both `lastReminderAt` and `lastVotedAt`.
-4. **Delivery fallback** – if channel delivery fails (missing perms, deleted channel), the bot falls back to DMs and logs the issue.
-5. **Smart buttons** – `Vote now` opens the URL (direct or signed). `Reset timer` records a vote immediately and restarts the cooldown.
-6. **Optional tracking** – with `PUBLIC_BASE_URL`, clicks pass through `/v?t=...`, updating `lastVotedAt` before redirecting to the actual vote page.
+1. **Fine-grained scheduler** ï¿½ each subscription gets a `node-cron` task that fires every minute in its configured timezone.
+2. **Daily window guard** ï¿½ reminders trigger only between `window.start` and `window.end`, supporting overnight windows (e.g., 22:00ï¿½06:00).
+3. **Per-entry cooldowns** ï¿½ set `cooldownMinutes` per vote entry (default 120). Timers consider both `lastReminderAt` and `lastVotedAt`.
+4. **Delivery fallback** ï¿½ if channel delivery fails (missing perms, deleted channel), the bot falls back to DMs and logs the issue.
+5. **Smart buttons** ï¿½ `Vote now` opens the URL (direct or signed). `Reset timer` records a vote immediately and restarts the cooldown.
+6. **Optional tracking** ï¿½ with `PUBLIC_BASE_URL`, clicks pass through `/v?t=...`, updating `lastVotedAt` before redirecting to the actual vote page.
 
 ## Data Persistence
-- `data/config.json` – global configuration (vote entries, timezone, forced mode). Created automatically when missing.
-- `data/subscriptions.json` – schema v4 list (one row per subscription). `storage.js` migrates legacy layouts (`subscribers.json`, etc.).
+- `data/config.json` ï¿½ global configuration (vote entries, timezone, forced mode). Created automatically when missing.
+- `data/subscriptions.json` ï¿½ schema v4 list (one row per subscription). `storage.js` migrates legacy layouts (`subscribers.json`, etc.).
 - Files are pretty-printed for easier manual inspection; they are written after every command-driven change.
 - Docker uses the `bot_data` volume to keep these files across restarts.
 
@@ -143,18 +143,18 @@ All interactive components are ephemeral to avoid cluttering public channels.
 
 ## HTTP Helper & Vote Tracking
 The embedded Express server provides:
-- `GET /` – returns `OK`, handy for uptime monitors.
-- `GET /health` – returns `{ ok: true }`.
-- `GET /v?t=<token>` – validates the HMAC signature, updates `lastVotedAt`, fetches the user display name, appends `?pseudo=<displayName>` to the actual vote URL, and redirects.
+- `GET /` ï¿½ returns `OK`, handy for uptime monitors.
+- `GET /health` ï¿½ returns `{ ok: true }`.
+- `GET /v?t=<token>` ï¿½ validates the HMAC signature, updates `lastVotedAt`, fetches the user display name, appends `?pseudo=<displayName>` to the actual vote URL, and redirects.
 
 Enable this workflow by setting `PUBLIC_BASE_URL` (pointing to the server that exposes the Express app) and `MARK_SECRET`. The `Vote now` button will then hit your domain first, giving you click analytics.
 
 ## Troubleshooting
-- **Slash commands do not appear** – double-check `CLIENT_ID`, rerun `npm run deploy:commands`. Without `GUILD_ID`, global propagation can take up to 1 hour.
-- **Bot online but no reminders** – ensure each vote entry has a valid URL, subscribers completed `/subscribe`, and current time falls inside their configured window.
-- **DMs fail** – Discord blocks DMs if the user disabled server messages. Encourage them to pick the channel delivery mode instead.
-- **Multiple vote URLs per server** – use `/addvote` to duplicate entries with different cooldowns, then assign subscribers via `/listvote`.
-- **Logging** – all major actions (errors, reminders, redirects) log to stdout/stderr. Hook your hosting provider to these logs for easier debugging.
+- **Slash commands do not appear** ï¿½ double-check `CLIENT_ID`, rerun `npm run deploy:commands`. Without `GUILD_ID`, global propagation can take up to 1 hour.
+- **Bot online but no reminders** ï¿½ ensure each vote entry has a valid URL, subscribers completed `/subscribe`, and current time falls inside their configured window.
+- **DMs fail** ï¿½ Discord blocks DMs if the user disabled server messages. Encourage them to pick the channel delivery mode instead.
+- **Multiple vote URLs per server** ï¿½ use `/addvote` to duplicate entries with different cooldowns, then assign subscribers via `/listvote`.
+- **Logging** ï¿½ all major actions (errors, reminders, redirects) log to stdout/stderr. Hook your hosting provider to these logs for easier debugging.
 
 ## License
 Distributed under the [MIT License](LICENSE). You are free to clone, modify, and deploy as long as the license notice remains intact.

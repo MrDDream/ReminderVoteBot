@@ -1,0 +1,23 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    container_name: ReminderVoteBot
+    restart: unless-stopped
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - CLIENT_ID=${CLIENT_ID}
+      - GUILD_ID=${GUILD_ID}
+      - DEFAULT_TZ=${DEFAULT_TZ:-Europe/Paris}
+      - BOT_LANG=${BOT_LANG:-fr}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
+      - MARK_SECRET=${MARK_SECRET}
+      - PORT=${PORT:-3000}
+      - NODE_ENV=production
+    volumes:
+      - bot_data:/app/data
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+volumes:
+  bot_data:
+

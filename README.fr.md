@@ -1,5 +1,7 @@
 # ReminderVoteBot
+Cette documentation est disponible en [Français](README.fr.md) et en [Anglais](README.md)
 
+## Vue d'ensemble
 Un bot Discord qui envoie des rappels de vote automatisés aux utilisateurs abonnés via messages privés ou mentions dans un salon. Le bot prend en charge plusieurs serveurs de vote, des fenêtres horaires personnalisables, une planification tenant compte des fuseaux horaires et des périodes de cooldown configurables.
 
 ## Fonctionnalités

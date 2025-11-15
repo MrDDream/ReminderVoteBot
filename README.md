@@ -1,5 +1,7 @@
 # ReminderVoteBot
+This documentation is available in [French](README.fr.md) and in [English](README.md)
 
+## Overview
 A Discord bot that sends automated vote reminders to subscribed users via direct messages or channel pings. The bot supports multiple vote servers, customizable time windows, timezone-aware scheduling, and configurable cooldown periods.
 
 ## Features
@@ -85,7 +87,6 @@ npm start
 | `PUBLIC_BASE_URL` | No | Base URL for vote redirect service | - |
 | `MARK_SECRET` | No | Secret key for vote token signing | - |
 | `PORT` | No | HTTP server port | `3000` |
-| `DEFAULT_VOTE_URL` | No | Legacy: default vote URL (deprecated, use `/addvote`) | - |
 
 ### Data Storage
 

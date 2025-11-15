@@ -1,101 +1,123 @@
-# ReminderVoteBot
+# 🤖 Discord Vote Reminder Bot 
 
-![Node.js](https://img.shields.io/badge/Node.js-18%2B-3C873A?style=flat&logo=node.js&logoColor=white)
-![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?style=flat&logo=discord&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-ready-0db7ed?style=flat&logo=docker&logoColor=white)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/discord-vote-reminder-bot?style=flat-square)
+![GitHub](https://img.shields.io/github/license/discord-vote-reminder-bot?style=flat-square)
+![GitHub top language](https://img.shields.io/github/languages/top/discord-vote-reminder-bot?style=flat-square)
 
-???? Looking for French docs? [Cliquez ici](README.fr.md).
+**Discord Vote Reminder Bot** est un bot Discord écrit en JavaScript, qui envoie des messages directs (DMs) aux utilisateurs abonnés toutes les deux heures avec un bouton de vote. Ce projet est open-source et est sous licence MIT.
 
-ReminderVoteBot is a plug-and-play Discord companion that nudges your players to vote on Top-Serveurs (and friends) without spamming chats. Subscribers pick their server, reminder window, timezone, and delivery mode�100% managed via slash commands.
+## 📑 Table des matières
 
-## ? Highlights
-- ?? Per-user reminders with 30-minute windows, per-entry cooldowns, DM or channel delivery, and auto-fallback to DMs.
-- ?? Multi-lingual (FR/EN) UI + multi-vote-entry management with `/addvote` & `/listvote`.
-- ?? Smart buttons: `Vote now` opens the real URL (or a signed redirect), `Reset timer` restarts the cooldown instantly.
-- ?? Lightweight Express server for `/health` and `/v?t=...` redirects so you can track vote clicks.
-- ?? Ready-made Docker image `ghcr.io/mrddream/remindervotebot:latest` with persistent volume for `data/`.
+- [Fonctionnalités principales](#-fonctionnalités-principales)
+- [Prérequis](#-prérequis)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [Utilisation](#-utilisation)
+- [Structure du projet](#-structure-du-projet)
+- [Technologies utilisées](#-technologies-utilisées)
+- [Contribution](#-contribution)
+- [Roadmap](#-roadmap)
+- [FAQ ou Troubleshooting](#-faq-ou-troubleshooting)
+- [Licence](#-licence)
+- [Auteurs et remerciements](#-auteurs-et-remerciements)
 
-## ?? Quickstart (Docker-first)
-1. **Prep env vars** � create a `.env` next to `docker-compose.yml`:
-   ```env
-   DISCORD_TOKEN=xxxxxxxx
-   CLIENT_ID=yyyyyyyy
-   GUILD_ID=optional_guild_id
-   BOT_LANG=en
-   DEFAULT_TZ=Europe/Paris
-   ```
-2. **Launch the public image**:
-   ```bash
-   docker compose pull
-   docker compose up -d
-   ```
-   The compose file already targets `ghcr.io/mrddream/remindervotebot:latest` and mounts a `bot_data` volume.
-3. **Deploy slash commands** (guild = instant, global = up to 1h):
-   ```bash
-   docker compose run --rm bot node src/deploy-commands.js
-   ```
-4. Check logs with `docker compose logs -f bot`. Config/state persists inside `bot_data`.
+## 🎯 Fonctionnalités principales
 
-## ????? Prefer local Node?
+- 📨 Envoie des DMs aux utilisateurs abonnés toutes les deux heures.
+- 🗳️ Intègre un bouton de vote dans les DMs.
+- 📝 Permet aux utilisateurs de s'abonner ou de se désabonner à tout moment.
+- 🕓 Utilise node-cron pour programmer l'envoi des DMs.
+- 🚀 Déployable avec Docker.
+
+## 💻 Prérequis
+
+- Node.js v14+
+- npm v6+
+- Un compte Discord avec les permissions de bot
+
+## 🏗 Installation 
+
+1. Clonez le dépôt sur votre machine locale :
 ```bash
-git clone https://github.com/<your-org>/ReminderVoteBot.git
-cd ReminderVoteBot
+git clone https://github.com/discord-vote-reminder-bot.git
+```
+2. Installez les dépendances avec npm :
+```bash
+cd discord-vote-reminder-bot
 npm install
-cp .env.example .env  # or create manually
-npm run deploy:commands
+```
+3. Créez un `.env` à partir du `.env.example` et remplissez les valeurs :
+```bash
+cp .env.example .env
+```
+4. Lancez le bot avec npm :
+```bash
 npm start
 ```
 
-## ?? Environment Variables
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `DISCORD_TOKEN` | ? | Bot token (Developer Portal > Bot). |
-| `CLIENT_ID` | ? | Application/client ID. |
-| `GUILD_ID` | ? | Guild ID for fast command deploy (leave empty = global). |
-| `DEFAULT_VOTE_URL` | ? | Initial vote URL seeded into config. |
-| `DEFAULT_TZ` | ? | Default timezone (e.g., `Europe/Paris`). |
-| `BOT_LANG` | ? | `fr` or `en`. |
-| `FORCE_DELIVERY_MODE` | ? | Force `dm` or `channel` for new subs. |
-| `PUBLIC_BASE_URL` | ? | Public domain for signed redirects. |
-| `MARK_SECRET` | ? | HMAC secret used when `PUBLIC_BASE_URL` is set. |
-| `PORT` | ? | Express port (default 3000). |
+## ⚙️ Configuration
 
-`DEFAULT_*` values only seed `data/config.json` on first launch�you can fine-tune later via `/listvote`.
+Les variables d'environnement suivantes doivent être configurées dans le fichier `.env` :
 
-## ?? Slash Commands Cheat Sheet
-| Command | What it does |
-| --- | --- |
-| `/subscribe` | Guided flow to pick vote entry, window, mode, timezone. |
-| `/unsubscribe` | Drop one or all reminders. |
-| `/status` | Display + edit current subscriptions. |
-| `/addvote` *(Manage Guild)* | Add a vote URL with label, cooldown, optional channel. |
-| `/listvote` *(Manage Guild)* | Update URLs/channels, switch defaults, delete entries with safe reassignment. |
+- `DISCORD_BOT_TOKEN` : Le token de votre bot Discord.
+- `CRON_SCHEDULE` : L'horaire des DMs (toutes les 2 heures par défaut).
 
-Interactions are ephemeral so public channels stay clean.
+## 📖 Utilisation
 
-## ?? Reminder Flow (TL;DR)
-1. Minute-level cron per subscription, aligned with its timezone.
-2. Fires only inside the configured window (overnight ranges supported).
-3. Cooldown respects both `lastReminderAt` and `lastVotedAt`.
-4. Channel mode falls back to DM if permissions break.
-5. Buttons open the vote link or reset the timer instantly.
-6. With `PUBLIC_BASE_URL`, clicks pass through `/v?t=...` before redirecting, so stats stay accurate.
+```javascript
+const Discord = require('discord.js');
+const client = new Discord.Client();
 
-## ?? Data & HTTP endpoints
-- `data/config.json` � vote entries, timezone defaults, forced mode.
-- `data/subscriptions.json` � schema v4, one record per subscription (legacy data auto-migrated).
-- Express exposes:
-  - `GET /` ? `OK`
-  - `GET /health` ? `{ ok: true }`
-  - `GET /v?t=TOKEN` ? validates HMAC, updates `lastVotedAt`, redirects with `?pseudo=<displayName>`
+client.once('ready', () => {
+  console.log('Bot is ready!');
+});
 
-## ?? Troubleshooting
-- ?? Slash commands missing? Re-run `npm run deploy:commands` (or Docker equivalent) and wait up to 1h for global deploys.
-- ?? DMs blocked? Ask members to switch to channel mode or enable server DMs.
-- ?? No reminders? Ensure vote entries have URLs, users finished `/subscribe`, and current time fits their window.
-- ??? Channel deleted? `/listvote` lets you assign another channel; the bot falls back to DM meanwhile.
-- ?? Need logs? `docker compose logs -f bot` (or stdout when running locally).
+client.login(process.env.DISCORD_BOT_TOKEN);
+```
 
-## ?? License
-Released under the [MIT License](LICENSE). Fork it, tweak it, ship it ?
+## 📂 Structure du projet
+
+```
+discord-vote-reminder-bot
+├── .git/
+├── src/
+├── .env.example
+├── .gitignore
+├── Dockerfile
+├── docker-compose-dev.yml
+├── docker-compose.yml
+├── package.json
+├── README.fr.md
+├── README.md
+└── LICENSE
+```
+
+## 🛠️ Technologies utilisées
+
+- ![JavaScript](https://img.shields.io/badge/-JavaScript-black?style=flat-square&logo=javascript)
+- ![Express](https://img.shields.io/badge/-Express-black?style=flat-square&logo=express)
+- ![Discord.js](https://img.shields.io/badge/-Discord.js-black?style=flat-square&logo=discord)
+- ![Dotenv](https://img.shields.io/badge/-Dotenv-black?style=flat-square&logo=dotenv)
+- ![Node-cron](https://img.shields.io/badge/-Node--cron-black?style=flat-square&logo=node-cron)
+
+## 👥 Contribution
+
+Nous accueillons toute contribution. Veuillez d'abord ouvrir une issue pour discuter de ce que vous souhaitez modifier.
+
+## 🚀 Roadmap
+
+- Ajouter des tests
+- Support de plusieurs langages
+- Plus d'options de configuration
+
+## ❓ FAQ ou Troubleshooting
+
+Si vous rencontrez des problèmes lors de l'utilisation de ce bot, veuillez vérifier la [section des problèmes](https://github.com/discord-vote-reminder-bot/issues) pour voir si votre problème a déjà été signalé. Si ce n'est pas le cas, n'hésitez pas à ouvrir une nouvelle issue.
+
+## 📜 Licence
+
+Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus d'informations.
+
+## 🙏 Auteurs et remerciements
+
+Ce bot a été créé par [Votre nom] et est maintenu par la communauté open-source. Nous remercions tous ceux qui ont contribué à ce projet.

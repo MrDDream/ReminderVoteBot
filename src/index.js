@@ -1,10 +1,11 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, time, TimestampStyles } from 'discord.js';
 import cron from 'node-cron';
 import express from 'express';
 import crypto from 'crypto';
-import { loadSubscriptions, saveSubscriptions, addSubscription, updateSubscription, removeSubscription, removeAllSubscriptionsForUser } from './storage.js';
+import { loadSubscriptions, saveSubscriptions, addSubscription, removeSubscription, removeAllSubscriptionsForUser } from './storage.js';
 import { loadConfig, saveConfig } from './config.js';
+import { isReminderDue, computeNextReminderAt, parseTimeInput, isValidTimezone } from './schedule.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -27,25 +28,54 @@ const client = new Client({
 
 let subscriptions = loadSubscriptions(); // v4 schema
 let config = loadConfig();
-const subscriptionCronTasks = new Map(); // subscriptionId -> cron.Task
 const DEFAULT_COOLDOWN_MINUTES = 120;
+const SNOOZE_MINUTES = 30;
+// After this many consecutive failed deliveries (DMs closed, channel deleted...), the subscription is paused.
+const MAX_FAILED_DELIVERIES = 3;
+const COLOR_REMINDER = 0x5865F2;
+const COLOR_SUCCESS = 0x57F287;
+const COLOR_WARNING = 0xFEE75C;
 const COOLDOWN_CHOICES = [
-	{ label: '1 heure', value: '60', minutes: 60 },
-	{ label: '2 heures', value: '120', minutes: 120 },
-	{ label: '3 heures', value: '180', minutes: 180 },
-	{ label: '4 heures', value: '240', minutes: 240 },
-	{ label: '12 heures', value: '720', minutes: 720 },
-	{ label: '24 heures', value: '1440', minutes: 1440 }
+	{ minutes: 60, fr: '1 heure', en: '1 hour' },
+	{ minutes: 120, fr: '2 heures', en: '2 hours' },
+	{ minutes: 180, fr: '3 heures', en: '3 hours' },
+	{ minutes: 240, fr: '4 heures', en: '4 hours' },
+	{ minutes: 720, fr: '12 heures', en: '12 hours' },
+	{ minutes: 1440, fr: '24 heures', en: '24 hours' }
 ];
-const HALF_HOUR_VALUES = Array.from({ length: 48 }, (_, idx) => {
-	const hours = Math.floor(idx / 2).toString().padStart(2, '0');
-	const minutes = idx % 2 === 0 ? '00' : '30';
-	return `${hours}:${minutes}`;
-});
-const TIME_PAGE_SIZE = 24;
-const subscribeSessions = new Map(); // userId -> session state
+const WINDOW_PRESETS = [
+	{ id: 'allday', window: null, fr: 'Toute la journée', en: 'All day' },
+	{ id: 'day', window: { start: '08:00', end: '20:00' }, fr: 'Journée', en: 'Daytime' },
+	{ id: 'morning', window: { start: '07:00', end: '12:00' }, fr: 'Matin', en: 'Morning' },
+	{ id: 'afternoon', window: { start: '12:00', end: '18:00' }, fr: 'Après-midi', en: 'Afternoon' },
+	{ id: 'evening', window: { start: '18:00', end: '23:30' }, fr: 'Soirée', en: 'Evening' }
+];
+const TIMEZONE_CHOICES = [
+	{ tz: 'Europe/Paris', fr: 'France, Belgique, Suisse', en: 'Central Europe (Paris, Berlin)' },
+	{ tz: 'Europe/London', fr: 'Royaume-Uni, Irlande, Portugal', en: 'UK, Ireland, Portugal' },
+	{ tz: 'Europe/Athens', fr: 'Europe de l’Est (Athènes, Bucarest)', en: 'Eastern Europe (Athens, Bucharest)' },
+	{ tz: 'Europe/Moscow', fr: 'Moscou, Istanbul', en: 'Moscow, Istanbul' },
+	{ tz: 'Africa/Casablanca', fr: 'Maroc', en: 'Morocco' },
+	{ tz: 'Africa/Algiers', fr: 'Algérie, Tunisie', en: 'Algeria, Tunisia' },
+	{ tz: 'Africa/Abidjan', fr: 'Afrique de l’Ouest (Dakar, Abidjan)', en: 'West Africa (Dakar, Abidjan)' },
+	{ tz: 'Africa/Lagos', fr: 'Afrique centrale (Douala, Kinshasa)', en: 'Central Africa (Lagos, Kinshasa)' },
+	{ tz: 'Indian/Reunion', fr: 'La Réunion, Maurice', en: 'Réunion, Mauritius' },
+	{ tz: 'America/Martinique', fr: 'Antilles (Martinique, Guadeloupe)', en: 'French West Indies' },
+	{ tz: 'America/Cayenne', fr: 'Guyane', en: 'French Guiana' },
+	{ tz: 'America/Toronto', fr: 'Québec, Est canadien', en: 'Quebec, Eastern Canada' },
+	{ tz: 'America/New_York', fr: 'USA Est (New York)', en: 'US Eastern (New York)' },
+	{ tz: 'America/Chicago', fr: 'USA Centre (Chicago)', en: 'US Central (Chicago)' },
+	{ tz: 'America/Los_Angeles', fr: 'USA Pacifique (Los Angeles)', en: 'US Pacific (Los Angeles)' },
+	{ tz: 'America/Sao_Paulo', fr: 'Brésil (São Paulo)', en: 'Brazil (São Paulo)' },
+	{ tz: 'Pacific/Noumea', fr: 'Nouvelle-Calédonie', en: 'New Caledonia' },
+	{ tz: 'Pacific/Tahiti', fr: 'Polynésie française', en: 'French Polynesia' },
+	{ tz: 'Asia/Tokyo', fr: 'Japon, Corée', en: 'Japan, Korea' },
+	{ tz: 'Australia/Sydney', fr: 'Australie Est (Sydney)', en: 'Eastern Australia (Sydney)' },
+	{ tz: 'UTC', fr: 'UTC', en: 'UTC' }
+];
+const subscribeSessions = new Map(); // userId -> subscribe form state
 const listVoteSessions = new Map(); // userId -> { selectedId?: string }
-const statusSessions = new Map(); // userId -> { selectedId?: string }
+const statusSessions = new Map(); // userId -> { selectedId?, editSession?, unsubscribeChoice? }
 
 function tr(frText, enText, params = {}) {
 	const template = BOT_LANG === 'en' ? enText : frText;
@@ -114,408 +144,581 @@ function getCooldownMsForSubscriber(sub) {
 	return getCooldownMsForEntry(entry);
 }
 
-function syncSubscribeSessionWindow(session) {
-	session.windowStart = session.startTime || null;
-	session.windowEnd = session.endTime || null;
+function getSubscriptionTimezone(sub) {
+	return sub?.timezone || config.timezone || 'Europe/Paris';
 }
 
-function renderSubscribeSummary(session, entries) {
-	syncSubscribeSessionWindow(session);
-	const entry = session?.voteUrlId ? entries.find(e => e.id === session.voteUrlId) : null;
-	const lines = [
-		tr('Configurez votre abonnement puis cliquez sur Valider.', 'Configure your subscription then click Confirm.'),
-		entry
-			? tr('Serveur sélectionné : {label}', 'Selected server: {label}', { label: entry.label })
-			: tr('Serveur sélectionné : (aucun)', 'Selected server: (none)'),
-		session?.windowStart && session?.windowEnd
-			? tr('Plage horaire : {start} - {end}', 'Reminder window: {start} - {end}', { start: session.windowStart, end: session.windowEnd })
-			: tr('Plage horaire : choisissez début et fin', 'Reminder window: pick a start and end'),
-		session?.mode
-			? tr('Mode de rappel : {mode}', 'Reminder mode: {mode}', {
-				mode: session.mode === 'channel' ? tr('Ping salon', 'Channel ping') : tr('MP', 'DM')
-			})
-			: tr('Mode de rappel : (non sélectionné)', 'Reminder mode: (not selected)')
-	];
-	if (session?.mode === 'channel' && entry && !entry.channelId) {
-		lines.push(tr('Attention : ce serveur n’a pas de salon configuré. Choisissez MP ou configurez un salon.', 'Warning: this server has no configured channel. Pick DM or configure one.'));
-	}
-	if (session?.windowStart) {
-		lines.push(tr('Premier rappel prévu à {time}.', 'First reminder planned at {time}.', { time: session.windowStart }));
-	}
-	return lines.join('\n');
+function getNextReminderAt(sub, now = Date.now()) {
+	return computeNextReminderAt(sub, getCooldownMsForSubscriber(sub), now, getSubscriptionTimezone(sub));
 }
 
-function buildTimeMenu(customId, selectedValue, page, placeholder) {
-	const values = HALF_HOUR_VALUES.slice(page * TIME_PAGE_SIZE, (page + 1) * TIME_PAGE_SIZE);
-	const menu = new StringSelectMenuBuilder()
+// ---------- Formatting helpers ----------
+
+function cooldownLabel(minutes) {
+	const choice = COOLDOWN_CHOICES.find(c => c.minutes === minutes);
+	if (choice) return tr(choice.fr, choice.en);
+	if (minutes % 60 === 0) return tr('{h} heures', '{h} hours', { h: minutes / 60 });
+	return `${minutes} min`;
+}
+
+function windowLabel(windowObj) {
+	if (!windowObj) return tr('Toute la journée', 'All day');
+	return `${windowObj.start} – ${windowObj.end}`;
+}
+
+function sameWindow(a, b) {
+	if (!a || !b) return !a && !b;
+	return a.start === b.start && a.end === b.end;
+}
+
+function getUtcOffsetLabel(timezone) {
+	try {
+		const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, timeZoneName: 'shortOffset' }).formatToParts(new Date());
+		const offset = parts.find(p => p.type === 'timeZoneName')?.value || 'GMT';
+		return offset.replace('GMT', 'UTC');
+	} catch {
+		return '';
+	}
+}
+
+function getLocalTimeLabel(timezone) {
+	try {
+		return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' }).format(new Date());
+	} catch {
+		return '';
+	}
+}
+
+function timezoneLabel(timezone) {
+	const choice = TIMEZONE_CHOICES.find(c => c.tz === timezone);
+	const name = choice ? tr(choice.fr, choice.en) : timezone;
+	const offset = getUtcOffsetLabel(timezone);
+	return offset && offset !== name ? `${name} (${offset})` : name;
+}
+
+function getChannelName(channelId) {
+	const channel = channelId ? client.channels.cache.get(channelId) : null;
+	return channel?.name ? `#${channel.name}` : tr('salon configuré', 'configured channel');
+}
+
+// For embeds: channel mentions are rendered by Discord.
+function modeLabel(mode, channelId) {
+	if (mode === 'channel') {
+		return tr('📢 Ping dans {channel}', '📢 Ping in {channel}', { channel: channelId ? `<#${channelId}>` : tr('(salon non configuré)', '(channel not set)') });
+	}
+	return tr('📨 Message privé', '📨 Direct message');
+}
+
+function formatDurationShort(ms) {
+	const totalMinutes = Math.max(1, Math.ceil(ms / 60000));
+	const days = Math.floor(totalMinutes / 1440);
+	const hours = Math.floor((totalMinutes % 1440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days > 0) {
+		return hours > 0 ? tr('{d}j {h}h', '{d}d {h}h', { d: days, h: hours }) : tr('{d}j', '{d}d', { d: days });
+	}
+	if (hours > 0) {
+		return minutes > 0 ? `${hours}h${String(minutes).padStart(2, '0')}` : `${hours}h`;
+	}
+	return `${minutes} min`;
+}
+
+function relativeTs(ms) {
+	return time(Math.floor(ms / 1000), TimestampStyles.RelativeTime);
+}
+
+function shortTimeTs(ms) {
+	return time(Math.floor(ms / 1000), TimestampStyles.ShortTime);
+}
+
+// For embeds: Discord renders the timestamp in the reader's timezone and language.
+function nextReminderText(sub, now = Date.now()) {
+	if (sub.paused) {
+		return tr('⏸️ En pause', '⏸️ Paused');
+	}
+	const next = getNextReminderAt(sub, now);
+	if (next === null) return '-';
+	if (next - now <= 60 * 1000) return tr('imminent', 'any moment now');
+	return `${shortTimeTs(next)} (${relativeTs(next)})`;
+}
+
+// For select menu descriptions, which do not render Discord timestamps.
+function nextReminderPlain(sub, now = Date.now()) {
+	if (sub.paused) return tr('en pause', 'paused');
+	const next = getNextReminderAt(sub, now);
+	if (next === null) return '-';
+	if (next - now <= 60 * 1000) return tr('rappel imminent', 'reminder any moment now');
+	return tr('prochain rappel dans {d}', 'next reminder in {d}', { d: formatDurationShort(next - now) });
+}
+
+function asUpdate(payload) {
+	return {
+		content: payload.content || '',
+		embeds: payload.embeds || [],
+		components: payload.components || []
+	};
+}
+
+function asReply(payload) {
+	return { ...payload, ephemeral: true };
+}
+
+// ---------- Shared form components (subscribe + status edit) ----------
+
+function buildWindowSelect(customId, windowObj) {
+	const select = new StringSelectMenuBuilder()
 		.setCustomId(customId)
-		.setPlaceholder(placeholder)
+		.setPlaceholder(tr('Plage horaire des rappels', 'Reminder time window'))
 		.setMinValues(1)
 		.setMaxValues(1);
-	for (const value of values) {
-		menu.addOptions({
-			label: value,
-			value,
-			default: value === selectedValue
+	const matchingPreset = WINDOW_PRESETS.find(p => sameWindow(p.window, windowObj));
+	for (const preset of WINDOW_PRESETS) {
+		select.addOptions({
+			label: preset.window ? `${tr(preset.fr, preset.en)} (${windowLabel(preset.window)})` : tr(preset.fr, preset.en),
+			value: `preset:${preset.id}`,
+			emoji: preset.window ? '🕗' : '🌐',
+			default: preset === matchingPreset
 		});
 	}
-	const hasNext = (page + 1) * TIME_PAGE_SIZE < HALF_HOUR_VALUES.length;
-	const hasPrev = page > 0;
-	if (hasNext) {
-		menu.addOptions({ label: tr('Suite 12h-23h30', 'Next 12:00-23:30'), value: '__next__' });
-	} else if (hasPrev) {
-		menu.addOptions({ label: tr('Retour 00h-11h30', 'Back 00:00-11:30'), value: '__prev__' });
+	if (!matchingPreset && windowObj) {
+		select.addOptions({
+			label: tr('Actuelle : {window}', 'Current: {window}', { window: windowLabel(windowObj) }),
+			value: 'current',
+			emoji: '🕗',
+			default: true
+		});
 	}
-	return menu;
+	select.addOptions({
+		label: tr('Personnalisée…', 'Custom…'),
+		value: 'custom',
+		emoji: '✏️',
+		description: tr('Saisir une heure de début et de fin', 'Type a start and end time')
+	});
+	return select;
 }
 
-function buildSubscribeComponents(entries, session) {
-	syncSubscribeSessionWindow(session);
-	const voteOptions = [];
-	const seen = new Set();
-	if (session.voteUrlId) {
-		const selectedEntry = entries.find(entry => entry.id === session.voteUrlId);
-		if (selectedEntry) {
-			voteOptions.push(selectedEntry);
-			seen.add(selectedEntry.id);
-		}
+function buildModeSelect(customId, mode, entry) {
+	const select = new StringSelectMenuBuilder()
+		.setCustomId(customId)
+		.setPlaceholder(tr('Mode de rappel', 'Reminder mode'))
+		.setMinValues(1)
+		.setMaxValues(1)
+		.addOptions({
+			label: tr('Message privé', 'Direct message'),
+			value: 'dm',
+			emoji: '📨',
+			description: tr('Recevoir le rappel en MP', 'Receive the reminder by DM'),
+			default: mode !== 'channel'
+		});
+	if (entry?.channelId) {
+		select.addOptions({
+			label: tr('Ping dans {channel}', 'Ping in {channel}', { channel: getChannelName(entry.channelId) }).slice(0, 100),
+			value: 'channel',
+			emoji: '📢',
+			description: tr('Être mentionné dans le salon du serveur', 'Get mentioned in the server channel'),
+			default: mode === 'channel'
+		});
 	}
-	for (const entry of entries) {
+	return select;
+}
+
+function buildTimezoneSelect(customId, timezone) {
+	const select = new StringSelectMenuBuilder()
+		.setCustomId(customId)
+		.setPlaceholder(tr('Fuseau horaire', 'Timezone'))
+		.setMinValues(1)
+		.setMaxValues(1);
+	const zones = TIMEZONE_CHOICES.map(c => c.tz);
+	if (timezone && !zones.includes(timezone)) zones.unshift(timezone);
+	for (const tz of zones.slice(0, 25)) {
+		select.addOptions({
+			label: timezoneLabel(tz).slice(0, 100),
+			value: tz,
+			description: tr('{tz} · il est {time}', '{tz} · it is {time}', { tz, time: getLocalTimeLabel(tz) }).slice(0, 100),
+			default: tz === timezone
+		});
+	}
+	return select;
+}
+
+function buildWindowModal(target, windowObj) {
+	return new ModalBuilder()
+		.setCustomId(`window-modal|${target}`)
+		.setTitle(tr('Plage horaire personnalisée', 'Custom time window'))
+		.addComponents(
+			new ActionRowBuilder().addComponents(
+				new TextInputBuilder()
+					.setCustomId('window_start')
+					.setLabel(tr('Début (HH:MM)', 'Start (HH:MM)'))
+					.setStyle(TextInputStyle.Short)
+					.setRequired(true)
+					.setMaxLength(5)
+					.setPlaceholder('08:00')
+					.setValue(windowObj?.start || '08:00')
+			),
+			new ActionRowBuilder().addComponents(
+				new TextInputBuilder()
+					.setCustomId('window_end')
+					.setLabel(tr('Fin (HH:MM)', 'End (HH:MM)'))
+					.setStyle(TextInputStyle.Short)
+					.setRequired(true)
+					.setMaxLength(5)
+					.setPlaceholder('22:00')
+					.setValue(windowObj?.end || '20:00')
+			)
+		);
+}
+
+// Applies a value picked in the window select. Returns 'custom' when the modal must be shown.
+function applyWindowSelection(form, value) {
+	if (value === 'custom') return 'custom';
+	if (value.startsWith('preset:')) {
+		const preset = WINDOW_PRESETS.find(p => `preset:${p.id}` === value);
+		if (preset) form.window = preset.window ? { ...preset.window } : null;
+	}
+	return 'updated';
+}
+
+function applyFormSelect(form, field, value) {
+	if (field === 'mode') {
+		form.mode = value === 'channel' ? 'channel' : 'dm';
+	} else if (field === 'timezone') {
+		if (isValidTimezone(value)) form.timezone = value;
+	}
+}
+
+// ---------- /subscribe ----------
+
+function getUserSubscriptions(userId) {
+	return subscriptions.filter(sub => sub.userId === userId);
+}
+
+function isAlreadySubscribed(userId, voteUrlId, exceptId = null) {
+	return subscriptions.some(sub => sub.userId === userId && sub.voteUrlId === voteUrlId && sub.id !== exceptId);
+}
+
+function renderSubscribeForm(session) {
+	const entries = getVoteUrlEntries();
+	const entry = session.voteUrlId ? entries.find(e => e.id === session.voteUrlId) : null;
+	if (session.mode === 'channel' && !entry?.channelId) session.mode = 'dm';
+	const duplicate = entry ? isAlreadySubscribed(session.userId, entry.id) : false;
+	const warnings = [];
+	if (duplicate) {
+		warnings.push(tr('⚠️ Vous êtes déjà abonné à **{label}**. Utilisez `/status` pour modifier cet abonnement.', '⚠️ You are already subscribed to **{label}**. Use `/status` to edit that subscription.', { label: entry.label }));
+	}
+	const preview = { window: session.window, lastVotedAt: null, lastReminderAt: null, voteUrlId: session.voteUrlId, timezone: session.timezone };
+	const embed = new EmbedBuilder()
+		.setColor(duplicate ? COLOR_WARNING : COLOR_REMINDER)
+		.setTitle(tr('🔔 Nouvel abonnement aux rappels', '🔔 New reminder subscription'))
+		.setDescription([
+			tr('Choisissez vos options avec les menus ci-dessous, puis cliquez sur **Valider**.', 'Pick your options with the menus below, then click **Confirm**.'),
+			...warnings
+		].join('\n\n'))
+		.addFields(
+			{ name: tr('Serveur', 'Server'), value: entry ? entry.label : tr('(aucun)', '(none)'), inline: true },
+			{ name: tr('Rappel toutes les', 'Remind every'), value: entry ? cooldownLabel(entry.cooldownMinutes) : '-', inline: true },
+			{ name: tr('Mode', 'Mode'), value: modeLabel(session.mode, entry?.channelId), inline: true },
+			{ name: tr('Plage horaire', 'Time window'), value: windowLabel(session.window), inline: true },
+			{ name: tr('Fuseau horaire', 'Timezone'), value: timezoneLabel(session.timezone), inline: true },
+			{ name: tr('Premier rappel', 'First reminder'), value: entry ? nextReminderText(preview) : '-', inline: true }
+		);
+	const voteOptions = [];
+	if (entry) voteOptions.push(entry);
+	for (const e of entries) {
 		if (voteOptions.length >= 25) break;
-		if (seen.has(entry.id)) continue;
-		voteOptions.push(entry);
-		seen.add(entry.id);
+		if (!voteOptions.includes(e)) voteOptions.push(e);
 	}
 	const voteMenu = new StringSelectMenuBuilder()
 		.setCustomId('subscribe-select-vote')
 		.setPlaceholder(tr('Choisissez un serveur', 'Choose a server'))
 		.setMinValues(1)
 		.setMaxValues(1)
-		.addOptions(voteOptions.map(entry => ({
-			label: entry.label.slice(0, 100),
-			value: entry.id,
-			description: entry.url.slice(0, 90),
-			default: entry.id === session.voteUrlId
+		.addOptions(voteOptions.map(e => ({
+			label: e.label.slice(0, 100),
+			value: e.id,
+			description: isAlreadySubscribed(session.userId, e.id)
+				? tr('✅ Déjà abonné', '✅ Already subscribed')
+				: tr('Rappel toutes les {cooldown}', 'Reminder every {cooldown}', { cooldown: cooldownLabel(e.cooldownMinutes) }),
+			default: e.id === session.voteUrlId
 		})));
-	const startPage = session.startPage ?? 0;
-	const endPage = session.endPage ?? 0;
-	const startMenu = buildTimeMenu(
-		'subscribe-select-start-time',
-		session.startTime || null,
-		startPage,
-		startPage === 1
-			? tr('Début (12h00-23h30)', 'Start (12:00-23:30)')
-			: tr('Début (00h00-11h30)', 'Start (00:00-11:30)')
-	);
-	const endMenu = buildTimeMenu(
-		'subscribe-select-end-time',
-		session.endTime || null,
-		endPage,
-		endPage === 1
-			? tr('Fin (12h00-23h30)', 'End (12:00-23:30)')
-			: tr('Fin (00h00-11h30)', 'End (00:00-11:30)')
-	);
-	const modeMenu = new StringSelectMenuBuilder()
-		.setCustomId('subscribe-select-mode')
-		.setPlaceholder(tr('Mode de rappel', 'Reminder mode'))
-		.setMinValues(1)
-		.setMaxValues(1)
-		.addOptions([
-			{
-				label: tr('MP', 'DM'),
-				value: 'dm',
-				description: tr('Envoyer un message privé', 'Send a direct message'),
-				default: session.mode === 'dm'
-			},
-			{
-				label: tr('Ping salon', 'Channel ping'),
-				value: 'channel',
-				description: tr('Mentionner dans le salon configuré', 'Mention in the configured channel'),
-				default: session.mode === 'channel'
-			}
-		]);
 	const confirmButton = new ButtonBuilder()
 		.setCustomId('subscribe-confirm')
 		.setLabel(tr('Valider', 'Confirm'))
 		.setStyle(ButtonStyle.Success)
-		.setDisabled(!(session.voteUrlId && session.windowStart && session.windowEnd && session.mode));
+		.setDisabled(!entry || duplicate);
 	const cancelButton = new ButtonBuilder()
 		.setCustomId('subscribe-cancel')
 		.setLabel(tr('Annuler', 'Cancel'))
 		.setStyle(ButtonStyle.Secondary);
-	return [
-		new ActionRowBuilder().addComponents(voteMenu),
-		new ActionRowBuilder().addComponents(startMenu),
-		new ActionRowBuilder().addComponents(endMenu),
-		new ActionRowBuilder().addComponents(modeMenu),
-		new ActionRowBuilder().addComponents(confirmButton, cancelButton)
-	];
+	return {
+		embeds: [embed],
+		components: [
+			new ActionRowBuilder().addComponents(voteMenu),
+			new ActionRowBuilder().addComponents(buildWindowSelect('subscribe-select-window', session.window)),
+			new ActionRowBuilder().addComponents(buildModeSelect('subscribe-select-mode', session.mode, entry)),
+			new ActionRowBuilder().addComponents(buildTimezoneSelect('subscribe-select-timezone', session.timezone)),
+			new ActionRowBuilder().addComponents(confirmButton, cancelButton)
+		]
+	};
 }
 
-function buildListVoteSelect(entries, selectedId) {
-	return new ActionRowBuilder().addComponents(
-		new StringSelectMenuBuilder()
-			.setCustomId('listvote-select-entry')
-			.setPlaceholder(tr('Choisissez une entrée à gérer', 'Choose an entry to manage'))
-			.setMinValues(1)
-			.setMaxValues(1)
-			.addOptions(entries.map(entry => ({
-				label: entry.label.slice(0, 100),
-				value: entry.id,
-				description: entry.url.slice(0, 90),
-				default: entry.id === selectedId
-			})))
-	);
-}
+// ---------- /status ----------
 
-function renderListVoteSummary(entry) {
-	if (!entry) {
-		return tr('Sélectionnez une entrée pour la modifier ou la supprimer.', 'Select an entry to edit or delete it.');
-	}
+function buildSubscriptionField(sub, index, selectedId) {
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
+	const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
 	const lines = [
-		tr('ID : {id}', 'ID: {id}', { id: entry.id }),
-		tr('Nom : {label}', 'Name: {label}', { label: entry.label }),
-		`URL: ${entry.url}`,
-		tr('Délai : {minutes} minutes', 'Cooldown: {minutes} minutes', { minutes: entry.cooldownMinutes }),
-		entry.channelId ? tr('Salon par défaut : <#{channel}>', 'Default channel: <#{channel}>', { channel: entry.channelId }) : tr('Salon par défaut : MP', 'Default channel: DM')
+		`🕗 ${windowLabel(sub.window)} · ${timezoneLabel(getSubscriptionTimezone(sub))}`,
+		modeLabel(sub.mode, sub.channelId),
+		tr('⏱️ Rappel toutes les {cooldown} tant que vous n’avez pas voté', '⏱️ Reminder every {cooldown} until you vote', {
+			cooldown: entry ? cooldownLabel(entry.cooldownMinutes) : tr('?', '?')
+		}),
+		sub.lastVotedAt
+			? tr('🗳️ Dernier vote : {when}', '🗳️ Last vote: {when}', { when: relativeTs(sub.lastVotedAt) })
+			: tr('🗳️ Dernier vote : jamais enregistré', '🗳️ Last vote: never recorded'),
+		sub.paused
+			? tr('⚠️ **En pause** : les derniers rappels n’ont pas pu être délivrés (MP fermés ?). Vérifiez vos paramètres de confidentialité puis cliquez sur **Réactiver**.', '⚠️ **Paused**: the last reminders could not be delivered (DMs closed?). Check your privacy settings then click **Resume**.')
+			: tr('🔔 Prochain rappel : {next}', '🔔 Next reminder: {next}', { next: nextReminderText(sub) })
 	];
-	return lines.join('\n');
+	return {
+		name: `${sub.id === selectedId ? '👉 ' : ''}${index + 1}. ${label}${sub.paused ? ' ⏸️' : ''}`.slice(0, 256),
+		value: lines.join('\n').slice(0, 1024)
+	};
 }
 
-function buildListVoteComponents(entries, selectedId) {
-	const rows = [buildListVoteSelect(entries, selectedId)];
-	if (selectedId) {
-		const actionRow = new ActionRowBuilder().addComponents(
-			new ButtonBuilder()
-				.setCustomId('listvote-edit')
-				.setLabel(tr('Modifier', 'Edit'))
-				.setStyle(ButtonStyle.Primary)
-				.setDisabled(false),
-			new ButtonBuilder()
-				.setCustomId('listvote-delete')
-				.setLabel(tr('Supprimer', 'Delete'))
-				.setStyle(ButtonStyle.Danger)
-				.setDisabled(false)
-		);
-		rows.push(actionRow);
-	}
-	return rows;
-}
-
-function formatSubscriptionLine(sub, index) {
-	const voteEntry = getVoteUrlEntryById(sub.voteUrlId);
-	const label = voteEntry ? `${voteEntry.label} (${voteEntry.id})` : tr('Serveur inconnu', 'Unknown server');
-	const tz = sub.timezone || config.timezone || 'Europe/Paris';
-	const windowText = sub.window ? `${sub.window.start}-${sub.window.end}` : tr('toute la journée', 'all day');
-	const modeText = sub.mode === 'channel'
-		? tr('Ping {channel}', 'Ping {channel}', { channel: sub.channelId ? `<#${sub.channelId}>` : tr('(salon non configuré)', '(channel not set)') })
-		: tr('MP', 'DM');
-	const cooldown = voteEntry?.cooldownMinutes ? `${voteEntry.cooldownMinutes}m` : tr('inconnu', 'unknown');
-	const timerText = getNextReminderLabel(sub);
-	return tr(
-		'{index}. {label} | {window} | TZ {tz} | {mode} | {cooldown} | {timer}',
-		'{index}. {label} | {window} | TZ {tz} | {mode} | {cooldown} | {timer}',
-		{ index: index + 1, label, window: windowText, tz, mode: modeText, cooldown, timer: timerText }
-	);
-}
-
-function formatStatusMessage(userId) {
-	const subs = subscriptions.filter(sub => sub.userId === userId);
+function renderStatus(userId, selectedId, notice = null) {
+	const subs = getUserSubscriptions(userId);
 	if (subs.length === 0) {
-		return tr('Aucun abonnement actif.', 'No active subscriptions.');
+		return { content: notice ? `${notice}\n${tr('Aucun abonnement actif.', 'No active subscriptions.')}` : tr('Aucun abonnement actif. Utilisez `/subscribe` pour en créer un.', 'No active subscriptions. Use `/subscribe` to create one.') };
 	}
-	const lines = subs.map((sub, idx) => formatSubscriptionLine(sub, idx));
-	const summary = [
-		tr('Nombre d’abonnements : {count}', 'Number of subscriptions: {count}', { count: subs.length }),
-		...lines,
-		tr('Utilisez le menu pour sélectionner un abonnement.', 'Use the menu to choose a subscription.')
-	];
+	if (!selectedId || !subs.some(sub => sub.id === selectedId)) selectedId = subs[0].id;
+	const shown = subs.slice(0, 25);
+	const description = [
+		notice,
+		tr('Sélectionnez un abonnement dans le menu pour le modifier ou le supprimer.', 'Select a subscription in the menu to edit or delete it.')
+	].filter(Boolean);
 	if (subs.length > 25) {
-		summary.push(tr('Seuls les 25 premiers abonnements apparaissent dans le menu pour modifications rapides.', 'Only the first 25 subscriptions appear in the quick-edit menu.'));
+		description.push(tr('Seuls les 25 premiers abonnements sont affichés.', 'Only the first 25 subscriptions are shown.'));
 	}
-	return summary.join('\n');
-}
-
-function buildStatusComponents(userId, selectedId) {
-	const subs = subscriptions.filter(sub => sub.userId === userId);
-	if (subs.length === 0) return [];
-	const limited = subs.slice(0, 25);
+	const embed = new EmbedBuilder()
+		.setColor(subs.some(sub => sub.paused) ? COLOR_WARNING : COLOR_REMINDER)
+		.setTitle(tr('📋 Vos abonnements ({count})', '📋 Your subscriptions ({count})', { count: subs.length }))
+		.setDescription(description.join('\n\n'))
+		.addFields(shown.map((sub, idx) => buildSubscriptionField(sub, idx, selectedId)));
 	const select = new StringSelectMenuBuilder()
 		.setCustomId('status-select-subscription')
 		.setPlaceholder(tr('Choisissez un abonnement à gérer', 'Choose a subscription to manage'))
 		.setMinValues(1)
-		.setMaxValues(1);
-	for (const sub of limited) {
-		const entry = getVoteUrlEntryById(sub.voteUrlId);
-		const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
-		const tz = sub.timezone || config.timezone || 'Europe/Paris';
-		const timerDesc = getNextReminderLabel(sub).replace('Timer:', tr('Timer', 'Timer')).trim();
-		const description = sub.window
-			? tr('{start}-{end} ({tz}) | {timer}', '{start}-{end} ({tz}) | {timer}', {
-				start: sub.window.start,
-				end: sub.window.end,
-				tz,
-				timer: timerDesc
-			})
-			: tr('Toute la journée ({tz}) | {timer}', 'All day ({tz}) | {timer}', { tz, timer: timerDesc });
-		select.addOptions({
-			label: label.slice(0, 100),
-			value: sub.id,
-			description: description.slice(0, 100),
-			default: sub.id === selectedId
-		});
-	}
-	if (selectedId && !limited.some(sub => sub.id === selectedId)) {
-		const selectedSub = subs.find(sub => sub.id === selectedId);
-		if (selectedSub) {
-			const entry = getVoteUrlEntryById(selectedSub.voteUrlId);
-			const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
-			const tz = selectedSub.timezone || config.timezone || 'Europe/Paris';
-			const timerDesc = getNextReminderLabel(selectedSub).replace('Timer:', tr('Timer', 'Timer')).trim();
-			const description = selectedSub.window
-				? tr('{start}-{end} ({tz}) | {timer}', '{start}-{end} ({tz}) | {timer}', {
-					start: selectedSub.window.start,
-					end: selectedSub.window.end,
-					tz,
-					timer: timerDesc
-				})
-				: tr('Toute la journée ({tz}) | {timer}', 'All day ({tz}) | {timer}', { tz, timer: timerDesc });
-			select.addOptions({
-				label: label.slice(0, 100),
-				value: selectedSub.id,
-				description: description.slice(0, 100),
-				default: true
-			});
-		}
-	}
-	const buttonRow = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('status-edit').setLabel(tr('Modifier', 'Edit')).setStyle(ButtonStyle.Primary),
-		new ButtonBuilder().setCustomId('status-delete').setLabel(tr('Supprimer', 'Delete')).setStyle(ButtonStyle.Danger)
-	);
-	return [
-		new ActionRowBuilder().addComponents(select),
-		buttonRow
-	];
-}
-
-function renderStatusEditSummary(sub, editSession) {
-	const entry = getVoteUrlEntryById(sub.voteUrlId);
-	const label = entry ? `${entry.label} (${entry.id})` : tr('Serveur inconnu', 'Unknown server');
-	const lines = [
-		tr('Modification de l’abonnement {id}', 'Editing subscription {id}', { id: sub.id }),
-		tr('Serveur : {label}', 'Server: {label}', { label }),
-		editSession.windowStart && editSession.windowEnd
-			? tr('Plage : {start}-{end}', 'Window: {start}-{end}', { start: editSession.windowStart, end: editSession.windowEnd })
-			: tr('Plage : sélectionnez début et fin', 'Window: pick a start and end'),
-		editSession.mode === 'channel' ? tr('Mode : Ping salon', 'Mode: Channel ping') : tr('Mode : MP', 'Mode: DM'),
-		tr('Utilisez les menus puis cliquez sur Valider ou Annuler.', 'Use the menus then press Confirm or Cancel.')
-	];
-	if (editSession.mode === 'channel' && (!entry || !entry.channelId)) {
-		lines.push(tr('Attention : ce serveur n’a pas de salon configuré. Choisissez MP ou configurez un salon.', 'Warning: this server has no configured channel. Pick DM or configure one.'));
-	}
-	return lines.join('\n');
-}
-
-function buildStatusEditComponents(editSession) {
-	syncSubscribeSessionWindow(editSession);
-	const startPage = editSession.startPage ?? 0;
-	const endPage = editSession.endPage ?? 0;
-	const startMenu = buildTimeMenu(
-		'status-edit-start-time',
-		editSession.startTime || null,
-		startPage,
-		startPage === 1
-			? tr('Début (12h00-23h30)', 'Start (12:00-23:30)')
-			: tr('Début (00h00-11h30)', 'Start (00:00-11:30)')
-	);
-	const endMenu = buildTimeMenu(
-		'status-edit-end-time',
-		editSession.endTime || null,
-		endPage,
-		endPage === 1
-			? tr('Fin (12h00-23h30)', 'End (12:00-23:30)')
-			: tr('Fin (00h00-11h30)', 'End (00:00-11:30)')
-	);
-	const modeMenu = new StringSelectMenuBuilder()
-		.setCustomId('status-edit-mode')
-		.setPlaceholder(tr('Mode de rappel', 'Reminder mode'))
-		.setMinValues(1)
 		.setMaxValues(1)
-		.addOptions([
-			{
-				label: tr('MP', 'DM'),
-				value: 'dm',
-				description: tr('Envoyer un message privé', 'Send a direct message'),
-				default: editSession.mode === 'dm'
-			},
-			{
-				label: tr('Ping salon', 'Channel ping'),
-				value: 'channel',
-				description: tr('Mentionner dans le salon configuré', 'Mention in the configured channel'),
-				default: editSession.mode === 'channel'
-			}
-		]);
-	const confirmButton = new ButtonBuilder()
-		.setCustomId('status-edit-confirm')
-		.setLabel(tr('Valider', 'Confirm'))
-		.setStyle(ButtonStyle.Success)
-		.setDisabled(!(editSession.windowStart && editSession.windowEnd && editSession.mode));
-	const cancelButton = new ButtonBuilder()
-		.setCustomId('status-edit-cancel')
-		.setLabel(tr('Annuler', 'Cancel'))
-		.setStyle(ButtonStyle.Secondary);
-	return [
-		new ActionRowBuilder().addComponents(startMenu),
-		new ActionRowBuilder().addComponents(endMenu),
-		new ActionRowBuilder().addComponents(modeMenu),
-		new ActionRowBuilder().addComponents(confirmButton, cancelButton)
+		.addOptions(shown.map((sub, idx) => subscriptionOption(sub, idx, sub.id === selectedId)));
+	const selected = subs.find(sub => sub.id === selectedId);
+	const buttons = [
+		new ButtonBuilder().setCustomId('status-edit').setLabel(tr('Modifier', 'Edit')).setEmoji('✏️').setStyle(ButtonStyle.Primary),
+		new ButtonBuilder().setCustomId('status-delete').setLabel(tr('Supprimer', 'Delete')).setEmoji('🗑️').setStyle(ButtonStyle.Danger)
 	];
+	if (selected?.paused) {
+		buttons.unshift(new ButtonBuilder().setCustomId('status-resume').setLabel(tr('Réactiver', 'Resume')).setEmoji('▶️').setStyle(ButtonStyle.Success));
+	}
+	return {
+		embeds: [embed],
+		components: [
+			new ActionRowBuilder().addComponents(select),
+			new ActionRowBuilder().addComponents(...buttons)
+		]
+	};
 }
 
-function buildUnsubscribeComponents(userId, choice) {
-	const subs = subscriptions.filter(sub => sub.userId === userId);
-	if (subs.length === 0) return [];
+function subscriptionOption(sub, index, isDefault) {
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
+	const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
+	return {
+		label: `${index + 1}. ${label}`.slice(0, 100),
+		value: sub.id,
+		emoji: sub.paused ? '⏸️' : (sub.mode === 'channel' ? '📢' : '📨'),
+		description: `${windowLabel(sub.window)} · ${nextReminderPlain(sub)}`.slice(0, 100),
+		default: isDefault
+	};
+}
+
+function renderStatusEdit(sub, editSession) {
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
+	if (editSession.mode === 'channel' && !entry?.channelId) editSession.mode = 'dm';
+	const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
+	const embed = new EmbedBuilder()
+		.setColor(COLOR_REMINDER)
+		.setTitle(tr('✏️ Modifier l’abonnement : {label}', '✏️ Edit subscription: {label}', { label }).slice(0, 256))
+		.setDescription(tr('Utilisez les menus puis cliquez sur **Valider** ou **Annuler**.', 'Use the menus then press **Confirm** or **Cancel**.'))
+		.addFields(
+			{ name: tr('Plage horaire', 'Time window'), value: windowLabel(editSession.window), inline: true },
+			{ name: tr('Fuseau horaire', 'Timezone'), value: timezoneLabel(editSession.timezone), inline: true },
+			{ name: tr('Mode', 'Mode'), value: modeLabel(editSession.mode, entry?.channelId), inline: true }
+		);
+	return {
+		embeds: [embed],
+		components: [
+			new ActionRowBuilder().addComponents(buildWindowSelect('status-edit-window', editSession.window)),
+			new ActionRowBuilder().addComponents(buildModeSelect('status-edit-mode', editSession.mode, entry)),
+			new ActionRowBuilder().addComponents(buildTimezoneSelect('status-edit-timezone', editSession.timezone)),
+			new ActionRowBuilder().addComponents(
+				new ButtonBuilder().setCustomId('status-edit-confirm').setLabel(tr('Valider', 'Confirm')).setStyle(ButtonStyle.Success),
+				new ButtonBuilder().setCustomId('status-edit-cancel').setLabel(tr('Annuler', 'Cancel')).setStyle(ButtonStyle.Secondary)
+			)
+		]
+	};
+}
+
+// ---------- /unsubscribe ----------
+
+function renderUnsubscribe(userId, choice) {
+	const subs = getUserSubscriptions(userId);
+	if (subs.length === 0) return { content: tr('Aucun abonnement actif.', 'No active subscriptions.') };
 	const sanitizedChoice = subs.some(sub => sub.id === choice) ? choice : 'all';
 	const limited = subs.slice(0, 24); // keep room for "all"
 	const select = new StringSelectMenuBuilder()
 		.setCustomId('unsubscribe-select')
 		.setPlaceholder(tr('Choisissez un abonnement à supprimer', 'Choose a subscription to delete'))
 		.setMinValues(1)
+		.setMaxValues(1)
+		.addOptions(limited.map((sub, idx) => subscriptionOption(sub, idx, sub.id === sanitizedChoice)))
+		.addOptions({
+			label: tr('Tous mes abonnements', 'All my subscriptions'),
+			value: 'all',
+			emoji: '🗑️',
+			default: sanitizedChoice === 'all'
+		});
+	const selectedSub = subs.find(sub => sub.id === sanitizedChoice);
+	const selectedEntry = selectedSub ? getVoteUrlEntryById(selectedSub.voteUrlId) : null;
+	const selectionText = sanitizedChoice === 'all'
+		? tr('tous vos abonnements ({count})', 'all your subscriptions ({count})', { count: subs.length })
+		: `**${selectedEntry ? selectedEntry.label : tr('Serveur inconnu', 'Unknown server')}** (${windowLabel(selectedSub.window)})`;
+	return {
+		content: tr('Choisissez l’abonnement à supprimer (ou Tous).\nSélection : {selection}', 'Choose which subscription to delete (or All).\nSelection: {selection}', { selection: selectionText }),
+		components: [
+			new ActionRowBuilder().addComponents(select),
+			new ActionRowBuilder().addComponents(
+				new ButtonBuilder().setCustomId('unsubscribe-confirm').setLabel(tr('Confirmer', 'Confirm')).setStyle(ButtonStyle.Danger),
+				new ButtonBuilder().setCustomId('unsubscribe-cancel').setLabel(tr('Annuler', 'Cancel')).setStyle(ButtonStyle.Secondary)
+			)
+		]
+	};
+}
+
+// ---------- /listvote ----------
+
+function renderListVote(selectedId, notice = null) {
+	const entries = getVoteUrlEntries();
+	if (entries.length === 0) {
+		return { content: [notice, tr('Aucune URL enregistrée.', 'No vote URL stored.')].filter(Boolean).join('\n') };
+	}
+	const entry = selectedId ? entries.find(e => e.id === selectedId) : null;
+	const lines = [notice];
+	if (!entry) {
+		lines.push(tr('Sélectionnez une entrée pour la modifier ou la supprimer.', 'Select an entry to edit or delete it.'));
+	} else {
+		const subscriberCount = subscriptions.filter(sub => sub.voteUrlId === entry.id).length;
+		lines.push(
+			tr('**{label}** (`{id}`)', '**{label}** (`{id}`)', { label: entry.label, id: entry.id }),
+			`URL : ${entry.url}`,
+			tr('Délai : {cooldown}', 'Cooldown: {cooldown}', { cooldown: cooldownLabel(entry.cooldownMinutes) }),
+			entry.channelId
+				? tr('Salon pour le mode ping : <#{channel}>', 'Channel for ping mode: <#{channel}>', { channel: entry.channelId })
+				: tr('Salon pour le mode ping : aucun (MP uniquement)', 'Channel for ping mode: none (DM only)'),
+			tr('Abonnés : {count}', 'Subscribers: {count}', { count: subscriberCount }),
+			'',
+			tr('Le délai et le salon se modifient directement avec les menus ci-dessous.', 'Cooldown and channel can be changed directly with the menus below.')
+		);
+	}
+	const rows = [
+		new ActionRowBuilder().addComponents(
+			new StringSelectMenuBuilder()
+				.setCustomId('listvote-select-entry')
+				.setPlaceholder(tr('Choisissez une entrée à gérer', 'Choose an entry to manage'))
+				.setMinValues(1)
+				.setMaxValues(1)
+				.addOptions(entries.slice(0, 25).map(e => ({
+					label: e.label.slice(0, 100),
+					value: e.id,
+					description: e.url.slice(0, 100),
+					default: e.id === selectedId
+				})))
+		)
+	];
+	if (entry) {
+		rows.push(
+			new ActionRowBuilder().addComponents(buildCooldownSelect('listvote-cooldown', entry.cooldownMinutes)),
+			new ActionRowBuilder().addComponents(buildChannelSelect('listvote-channel', entry.channelId)),
+			new ActionRowBuilder().addComponents(
+				new ButtonBuilder().setCustomId('listvote-edit').setLabel(tr('Modifier nom / URL', 'Edit name / URL')).setEmoji('✏️').setStyle(ButtonStyle.Primary),
+				new ButtonBuilder().setCustomId('listvote-delete').setLabel(tr('Supprimer', 'Delete')).setEmoji('🗑️').setStyle(ButtonStyle.Danger)
+			)
+		);
+	}
+	return { content: lines.filter(line => line !== null).join('\n'), components: rows };
+}
+
+function buildCooldownSelect(customId, minutes) {
+	const select = new StringSelectMenuBuilder()
+		.setCustomId(customId)
+		.setPlaceholder(tr('Délai entre deux votes', 'Cooldown between votes'))
+		.setMinValues(1)
 		.setMaxValues(1);
-	for (const sub of limited) {
-		const entry = getVoteUrlEntryById(sub.voteUrlId);
-		const label = entry ? entry.label : tr('Serveur inconnu', 'Unknown server');
-		const tz = sub.timezone || config.timezone || 'Europe/Paris';
-		const timerDesc = getNextReminderLabel(sub).replace('Timer:', tr('Timer', 'Timer')).trim();
-		const description = sub.window
-			? tr('{start}-{end} ({tz}) | {timer}', '{start}-{end} ({tz}) | {timer}', {
-				start: sub.window.start,
-				end: sub.window.end,
-				tz,
-				timer: timerDesc
-			})
-			: tr('Toute la journée ({tz}) | {timer}', 'All day ({tz}) | {timer}', { tz, timer: timerDesc });
+	const choices = COOLDOWN_CHOICES.map(c => c.minutes);
+	if (!choices.includes(minutes)) choices.push(minutes);
+	for (const value of choices) {
 		select.addOptions({
-			label: label.slice(0, 100),
-			value: sub.id,
-			description: description.slice(0, 100),
-			default: sub.id === sanitizedChoice
+			label: tr('Délai : {cooldown}', 'Cooldown: {cooldown}', { cooldown: cooldownLabel(value) }),
+			value: String(value),
+			emoji: '⏱️',
+			default: value === minutes
 		});
 	}
-	select.addOptions({
-		label: tr('Tous mes abonnements', 'All my subscriptions'),
-		value: 'all',
-		default: sanitizedChoice === 'all'
-	});
-	const buttons = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('unsubscribe-confirm').setLabel(tr('Confirmer', 'Confirm')).setStyle(ButtonStyle.Danger),
-		new ButtonBuilder().setCustomId('unsubscribe-cancel').setLabel(tr('Annuler', 'Cancel')).setStyle(ButtonStyle.Secondary)
-	);
-	return [
-		new ActionRowBuilder().addComponents(select),
-		buttons
-	];
+	return select;
 }
+
+function buildChannelSelect(customId, channelId) {
+	const select = new ChannelSelectMenuBuilder()
+		.setCustomId(customId)
+		.setPlaceholder(tr('Salon pour le mode ping (vide = MP uniquement)', 'Channel for ping mode (empty = DM only)'))
+		.setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+		.setMinValues(0)
+		.setMaxValues(1);
+	if (channelId) select.setDefaultChannels(channelId);
+	return select;
+}
+
+function isValidVoteUrl(urlStr) {
+	try {
+		const url = new URL(urlStr.split('{pseudo}').join('pseudo'));
+		return url.protocol === 'https:' || url.protocol === 'http:';
+	} catch {
+		return false;
+	}
+}
+
+function updateVoteEntry(entryId, fields) {
+	const entries = getVoteUrlEntries();
+	const idx = entries.findIndex(entry => entry.id === entryId);
+	if (idx === -1) return null;
+	const updatedEntry = { ...entries[idx], ...fields };
+	const newEntries = [...entries];
+	newEntries[idx] = updatedEntry;
+	config.voteUrls = newEntries;
+	syncLegacyVoteBaseUrl();
+	saveConfig(config);
+	if ('channelId' in fields) {
+		let updatedSubs = 0;
+		for (const sub of subscriptions) {
+			if (sub.voteUrlId === entryId && sub.mode === 'channel') {
+				sub.channelId = updatedEntry.channelId || null;
+				updatedSubs += 1;
+			}
+		}
+		if (updatedSubs > 0) saveSubscriptions(subscriptions);
+	}
+	return updatedEntry;
+}
+
+// ---------- Logging ----------
 
 function log(level, message, meta) {
 	const timestamp = new Date().toISOString();
@@ -553,11 +756,16 @@ function serializeError(err) {
 	};
 }
 
+// ---------- Vote URLs and tokens ----------
+
 function buildVoteUrlForUser(username, voteUrlId) {
-	// Le site peut ne pas supporter le pre-remplissage via query, mais on encode le pseudo.
 	const entry = getVoteUrlEntryById(voteUrlId);
 	const baseUrl = entry?.url || config.voteBaseUrl;
 	if (!baseUrl) return null;
+	// "{pseudo}" placeholder anywhere in the URL (path or query); otherwise append ?pseudo=.
+	if (baseUrl.includes('{pseudo}')) {
+		return baseUrl.split('{pseudo}').join(encodeURIComponent(username));
+	}
 	const url = new URL(baseUrl);
 	url.searchParams.set('pseudo', username);
 	return url.toString();
@@ -582,49 +790,76 @@ function verifyToken(tokenStr) {
 	}
 }
 
-function buildReminderButtons(sub, redirectUrl, directVoteUrl) {
-	if (PUBLIC_BASE_URL) {
-		const openBtn = new ButtonBuilder()
+function buildVoteLinkUrl(sub, directVoteUrl) {
+	if (!PUBLIC_BASE_URL) return directVoteUrl;
+	// The subscription id is needed so the vote is recorded on the right subscription.
+	const token = signToken({ sid: sub.id, uid: sub.userId, iat: Date.now() });
+	return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/v?t=${encodeURIComponent(token)}`;
+}
+
+// ---------- Reminder messages ----------
+
+function reminderTitle(entry) {
+	return tr('🗳️ Rappel de vote : {label}', '🗳️ Vote reminder: {label}', { label: entry ? entry.label : '?' }).slice(0, 256);
+}
+
+function buildReminderButtons(sub, voteLinkUrl) {
+	return new ActionRowBuilder().addComponents(
+		new ButtonBuilder()
 			.setLabel(tr('Voter maintenant', 'Vote now'))
 			.setStyle(ButtonStyle.Link)
-			.setURL(redirectUrl);
-		return new ActionRowBuilder().addComponents(openBtn);
-	}
-	const voteBtn = new ButtonBuilder()
-		.setLabel(tr('Voter maintenant', 'Vote now'))
-		.setStyle(ButtonStyle.Link)
-		.setURL(directVoteUrl);
-	const resetBtn = new ButtonBuilder()
-		.setCustomId(`reminder-reset|${sub.id}`)
-		.setLabel(tr('Relancer le timer', 'Reset timer'))
-		.setStyle(ButtonStyle.Primary);
-	return new ActionRowBuilder().addComponents(voteBtn, resetBtn);
+			.setURL(voteLinkUrl),
+		new ButtonBuilder()
+			.setCustomId(`reminder-voted|${sub.id}`)
+			.setLabel(tr('J’ai voté', 'I voted'))
+			.setEmoji('✅')
+			.setStyle(ButtonStyle.Success),
+		new ButtonBuilder()
+			.setCustomId(`reminder-snooze|${sub.id}`)
+			.setLabel(tr('Dans {minutes} min', 'In {minutes} min', { minutes: SNOOZE_MINUTES }))
+			.setEmoji('⏰')
+			.setStyle(ButtonStyle.Secondary)
+	);
 }
 
-function formatDurationShort(ms) {
-	const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0) {
-		return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+function buildReminderEmbed(sub, entry, now) {
+	const nextIfIgnored = getNextReminderAt({ ...sub, lastReminderAt: now, snoozeUntil: null }, now);
+	const lines = [
+		tr('C’est l’heure de voter pour **{label}** !', 'Time to vote for **{label}**!', { label: entry ? entry.label : '?' }),
+		PUBLIC_BASE_URL
+			? tr('Le bouton **Voter maintenant** enregistre votre vote automatiquement.', 'The **Vote now** button records your vote automatically.')
+			: tr('Après avoir voté, cliquez sur **J’ai voté** pour relancer le délai.', 'Once you have voted, click **I voted** to restart the timer.')
+	];
+	if (nextIfIgnored) {
+		lines.push(tr('Sans vote, prochain rappel {when}.', 'Without a vote, next reminder {when}.', { when: relativeTs(nextIfIgnored) }));
 	}
-	if (minutes > 0) {
-		return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
-	}
-	return `${seconds}s`;
+	return new EmbedBuilder()
+		.setColor(COLOR_REMINDER)
+		.setTitle(reminderTitle(entry))
+		.setDescription(lines.join('\n'));
 }
 
-function getNextReminderLabel(sub) {
-	const cooldownMs = getCooldownMsForSubscriber(sub);
-	const base = Math.max(sub.lastVotedAt || 0, sub.lastReminderAt || 0);
-	if (!base) {
-		if (sub.window?.start) return `Timer: premier rappel vers ${sub.window.start}`;
-		return 'Timer: en attente de programmation';
-	}
-	const remaining = base + cooldownMs - Date.now();
-	if (remaining <= 0) return 'Timer: pret';
-	return `Timer: ${formatDurationShort(remaining)}`;
+function buildReminderVotedPayload(sub) {
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
+	const next = getNextReminderAt(sub);
+	const embed = new EmbedBuilder()
+		.setColor(COLOR_SUCCESS)
+		.setTitle(reminderTitle(entry))
+		.setDescription([
+			tr('✅ Vote enregistré {when}. Merci !', '✅ Vote recorded {when}. Thanks!', { when: relativeTs(sub.lastVotedAt || Date.now()) }),
+			next ? tr('Prochain rappel {when}.', 'Next reminder {when}.', { when: relativeTs(next) }) : null
+		].filter(Boolean).join('\n'));
+	return { embeds: [embed], components: [] };
+}
+
+function buildReminderSnoozedPayload(sub, voteLinkUrl) {
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
+	const next = getNextReminderAt(sub);
+	const embed = new EmbedBuilder()
+		.setColor(COLOR_REMINDER)
+		.setTitle(reminderTitle(entry))
+		.setDescription(tr('⏰ Rappel reporté : nouveau rappel {when}.', '⏰ Reminder snoozed: next reminder {when}.', { when: next ? relativeTs(next) : '-' }));
+	return { embeds: [embed], components: voteLinkUrl ? [buildReminderButtons(sub, voteLinkUrl)] : [] };
 }
 
 async function getDisplayNameForUser(contextGuildId, userId, fallbackUsername) {
@@ -640,203 +875,739 @@ async function getDisplayNameForUser(contextGuildId, userId, fallbackUsername) {
 	return fallbackUsername;
 }
 
-async function deliverReminderViaChannel(sub, components, context) {
+async function buildVoteLinkForSub(sub) {
+	const user = await client.users.fetch(sub.userId);
+	const displayName = await getDisplayNameForUser(sub.guildId, sub.userId, user.username);
+	const voteTarget = buildVoteUrlForUser(displayName, sub.voteUrlId);
+	return { user, displayName, voteLinkUrl: voteTarget ? buildVoteLinkUrl(sub, voteTarget) : null };
+}
+
+async function deliverReminderViaChannel(sub, payload, context) {
 	try {
 		const channel = await client.channels.fetch(sub.channelId);
 		if (!channel) {
 			log('warn', 'Channel introuvable pour le rappel', context);
-			return false;
+			return null;
 		}
 		if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) {
 			log('warn', 'Type de channel incompatible pour rappel', { ...context, channelType: channel.type });
-			return false;
+			return null;
 		}
-		await channel.send({
-			content: tr('<@{userId}> Rappel de vote', '<@{userId}> Vote reminder', { userId: sub.userId }),
-			components
+		const message = await channel.send({
+			content: `<@${sub.userId}>`,
+			allowedMentions: { users: [sub.userId] },
+			...payload
 		});
 		log('info', 'Rappel envoye sur le channel', context);
-		return true;
+		return message;
 	} catch (err) {
 		log('error', 'Echec de lenvoi du rappel sur le channel', { ...context, error: serializeError(err) });
-		return false;
+		return null;
 	}
 }
 
-async function deliverReminderViaDm(user, components, context, isFallback) {
+async function deliverReminderViaDm(user, payload, context, isFallback) {
 	try {
-		await user.send({
-			content: tr('Rappel de vote !', 'Vote reminder!'),
-			components
-		});
+		const message = await user.send(payload);
 		log('info', isFallback ? 'Rappel envoye en MP (fallback)' : 'Rappel envoye en MP', context);
-		return true;
+		return message;
 	} catch (err) {
 		log('error', 'Echec de lenvoi du rappel en MP', { ...context, error: serializeError(err) });
-		return false;
+		return null;
 	}
 }
 
 async function sendVoteReminder(sub) {
 	const now = Date.now();
-	const base = Math.max(sub.lastVotedAt || 0, sub.lastReminderAt || 0);
-	const cooldownMs = getCooldownMsForSubscriber(sub);
-	if (base && now < base + cooldownMs) return;
-	const user = await client.users.fetch(sub.userId);
-	const displayName = await getDisplayNameForUser(sub.guildId, sub.userId, user.username);
-	const voteTarget = buildVoteUrlForUser(displayName, sub.voteUrlId);
-	if (!voteTarget) {
-		log('warn', 'Aucune URL de vote disponible pour le rappel', { userId: sub.userId, voteUrlId: sub.voteUrlId || null });
-		return;
-	}
-	let redirectUrl = voteTarget;
-	if (PUBLIC_BASE_URL) {
-		const token = signToken({ uid: sub.userId, gid: sub.guildId || null, iat: Date.now() });
-		redirectUrl = `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/v?t=${encodeURIComponent(token)}`;
-	}
+	const entry = getVoteUrlEntryById(sub.voteUrlId);
 	const context = {
+		subscriptionId: sub.id,
 		userId: sub.userId,
 		guildId: sub.guildId || null,
 		mode: sub.mode || 'dm',
 		channelId: sub.channelId || null,
-		displayName,
 		voteUrlId: sub.voteUrlId || null
 	};
-	const channelComponents = [buildReminderButtons(sub, redirectUrl, voteTarget)];
-	const dmComponents = [buildReminderButtons(sub, redirectUrl, voteTarget)];
-	let delivered = false;
-	if (sub.mode === 'channel' && sub.channelId) {
-		delivered = await deliverReminderViaChannel(sub, channelComponents, context);
-		if (!delivered) {
-			log('warn', 'Echec du rappel via channel, tentative en MP', context);
-		}
-	} else if (sub.mode === 'channel') {
-		log('warn', 'Mode channel demande mais aucun channelId stocke', context);
-	}
-	if (!delivered) {
-		delivered = await deliverReminderViaDm(user, dmComponents, context, sub.mode === 'channel');
-	}
-	if (delivered) {
-		sub.lastReminderAt = now;
-		saveSubscriptions(subscriptions);
-	} else {
-		log('warn', 'Rappel non envoye: aucune route disponible', context);
-	}
-}
-
-function isValidTime(hhmm) {
-	const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hhmm);
-	return !!m;
-}
-
-function isHalfHour(hhmm) {
-	if (!isValidTime(hhmm)) return false;
-	return hhmm.endsWith(':00') || hhmm.endsWith(':30');
-}
-
-function timeStringToMinutes(hhmm) {
-	if (!isValidTime(hhmm)) return null;
-	const [h, m] = hhmm.split(':').map(v => parseInt(v, 10));
-	return h * 60 + m;
-}
-
-function getTimePage(value) {
-	const minutes = timeStringToMinutes(value);
-	if (minutes === null) return 0;
-	return minutes >= 12 * 60 ? 1 : 0;
-}
-
-function withinWindow(now, windowObj, timezone) {
-	if (!windowObj) return true;
-	// Compute in timezone by using Intl and minutes from midnight in that TZ
-	const fmt = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour12: false, hour: '2-digit', minute: '2-digit' });
-	const parts = fmt.formatToParts(now);
-	const hh = parseInt(parts.find(p => p.type === 'hour').value, 10);
-	const mm = parseInt(parts.find(p => p.type === 'minute').value, 10);
-	const nowMin = hh * 60 + mm;
-	const [sh, sm] = windowObj.start.split(':').map(x => parseInt(x, 10));
-	const [eh, em] = windowObj.end.split(':').map(x => parseInt(x, 10));
-	const startMin = sh * 60 + sm;
-	const endMin = eh * 60 + em;
-	if (startMin <= endMin) {
-		return nowMin >= startMin && nowMin <= endMin;
-	}
-	// Overnight window (e.g., 22:00-06:00)
-	return nowMin >= startMin || nowMin <= endMin;
-}
-
-function getTzTimeParts(date, timezone) {
-	const fmt = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour12: false, hour: '2-digit', minute: '2-digit' });
-	const parts = fmt.formatToParts(date);
-	const hh = parseInt(parts.find(p => p.type === 'hour').value, 10);
-	const mm = parseInt(parts.find(p => p.type === 'minute').value, 10);
-	return { hh, mm, total: hh * 60 + mm };
-}
-
-function tzDayString(ts, timezone) {
-	const d = new Date(ts);
-	const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
-	// en-CA gives YYYY-MM-DD
-	return fmt.format(d);
-}
-
-function stopSubscriptionTask(subscriptionId) {
-	const task = subscriptionCronTasks.get(subscriptionId);
-	if (task) {
-		try { task.stop(); } catch {}
-	}
-	subscriptionCronTasks.delete(subscriptionId);
-}
-
-function scheduleSubscription(subscription) {
-	stopSubscriptionTask(subscription.id);
-	const timezone = subscription.timezone || config.timezone || 'Europe/Paris';
-	const task = cron.schedule('*/1 * * * *', async () => {
-		const sub = subscriptions.find(s => s.id === subscription.id);
-		if (!sub) {
-			stopSubscriptionTask(subscription.id);
+	let message = null;
+	try {
+		const { user, displayName, voteLinkUrl } = await buildVoteLinkForSub(sub);
+		context.displayName = displayName;
+		if (!voteLinkUrl) {
+			log('warn', 'Aucune URL de vote disponible pour le rappel', context);
 			return;
 		}
-		const now = new Date();
-		const timeParts = getTzTimeParts(now, timezone);
-		if (!withinWindow(now, sub.window, timezone)) return;
-		try {
-			const todayStr = tzDayString(Date.now(), timezone);
-			const sentToday = sub.lastReminderAt && tzDayString(sub.lastReminderAt, timezone) === todayStr;
-			const startMin = sub.window ? timeStringToMinutes(sub.window.start) : null;
-			if (!sentToday) {
-				if (startMin !== null && timeParts.total !== startMin) {
-					return;
-				}
-				await sendVoteReminder(sub);
-				return;
+		const payload = {
+			embeds: [buildReminderEmbed(sub, entry, now)],
+			components: [buildReminderButtons(sub, voteLinkUrl)]
+		};
+		if (sub.mode === 'channel' && sub.channelId) {
+			message = await deliverReminderViaChannel(sub, payload, context);
+			if (!message) {
+				log('warn', 'Echec du rappel via channel, tentative en MP', context);
 			}
-			if (sub.lastVotedAt && sub.lastVotedAt > (sub.lastReminderAt || 0)) {
-				if (Date.now() >= sub.lastVotedAt + getCooldownMsForSubscriber(sub)) {
-					await sendVoteReminder(sub);
-				}
-			}
-		} catch (err) {
-			log('error', 'Erreur lors de lexecution de la tache de rappel', { subscriptionId: sub.id, userId: sub.userId, error: serializeError(err) });
+		} else if (sub.mode === 'channel') {
+			log('warn', 'Mode channel demande mais aucun channelId stocke', context);
 		}
-	}, { timezone });
-	subscriptionCronTasks.set(subscription.id, task);
+		if (!message) {
+			message = await deliverReminderViaDm(user, payload, context, sub.mode === 'channel');
+		}
+	} catch (err) {
+		log('error', 'Erreur lors de la preparation du rappel', { ...context, error: serializeError(err) });
+	}
+	// Counted as an attempt even on failure, so a failing route is retried after the cooldown, not every minute.
+	sub.lastReminderAt = now;
+	sub.snoozeUntil = null;
+	if (message) {
+		sub.failedDeliveries = 0;
+		sub.lastReminderMessage = { channelId: message.channelId, messageId: message.id };
+	} else {
+		sub.failedDeliveries = (sub.failedDeliveries || 0) + 1;
+		log('warn', 'Rappel non envoye: aucune route disponible', { ...context, failedDeliveries: sub.failedDeliveries });
+		if (sub.failedDeliveries >= MAX_FAILED_DELIVERIES) {
+			sub.paused = true;
+			log('warn', 'Abonnement mis en pause apres plusieurs echecs', context);
+		}
+	}
+	saveSubscriptions(subscriptions);
 }
 
-function scheduleAll() {
-	log('info', 'Replanification des rappels', { count: subscriptions.length });
-	for (const [subId] of subscriptionCronTasks) stopSubscriptionTask(subId);
-	for (const s of subscriptions) {
-		if (s.userId && s.voteUrlId) {
-			scheduleSubscription(s);
+function markVoted(sub) {
+	sub.lastVotedAt = Date.now();
+	sub.snoozeUntil = null;
+	sub.paused = false;
+	sub.failedDeliveries = 0;
+	saveSubscriptions(subscriptions);
+}
+
+// Best effort: show the vote as recorded on the last reminder message (used by the web redirect).
+async function refreshLastReminderMessage(sub) {
+	const ref = sub.lastReminderMessage;
+	if (!ref) return;
+	try {
+		const channel = await client.channels.fetch(ref.channelId);
+		await channel?.messages?.edit(ref.messageId, buildReminderVotedPayload(sub));
+	} catch (err) {
+		log('warn', 'Impossible de mettre a jour le dernier rappel', { subscriptionId: sub.id, error: serializeError(err) });
+	}
+}
+
+// ---------- Scheduling ----------
+
+let reminderTickRunning = false;
+
+// A single loop checks every subscription each minute: a reminder is due when the
+// cooldown since the last reminder/vote has elapsed and the user is inside their window.
+async function runReminderTick() {
+	if (reminderTickRunning) return;
+	reminderTickRunning = true;
+	try {
+		const now = Date.now();
+		for (const sub of [...subscriptions]) {
+			if (!sub.userId || !sub.voteUrlId) continue;
+			if (!subscriptions.includes(sub)) continue;
+			try {
+				if (!isReminderDue(sub, getCooldownMsForSubscriber(sub), now, getSubscriptionTimezone(sub))) continue;
+				await sendVoteReminder(sub);
+			} catch (err) {
+				log('error', 'Erreur lors de lexecution de la tache de rappel', { subscriptionId: sub.id, userId: sub.userId, error: serializeError(err) });
+			}
 		}
+	} finally {
+		reminderTickRunning = false;
 	}
 }
 
 client.once(Events.ClientReady, () => {
-	log('info', 'Client pret', { tag: client.user.tag });
-	scheduleAll();
+	log('info', 'Client pret', { tag: client.user.tag, subscriptions: subscriptions.length });
+	cron.schedule('* * * * *', runReminderTick);
+	runReminderTick();
 });
+
+// ---------- Interaction handlers ----------
+
+async function handleModalSubmit(interaction) {
+	if (interaction.customId.startsWith('addvote-modal|')) {
+		const [, cooldownRaw, channelRaw] = interaction.customId.split('|');
+		const minutes = parseInt(cooldownRaw, 10) || DEFAULT_COOLDOWN_MINUTES;
+		const channelId = channelRaw || null;
+		const labelRaw = interaction.fields.getTextInputValue('display_name')?.trim();
+		const urlRaw = interaction.fields.getTextInputValue('vote_url')?.trim();
+		if (!labelRaw) {
+			await interaction.reply(asReply({ content: tr('Le nom ne peut pas être vide.', 'Name cannot be empty.') }));
+			return;
+		}
+		if (!urlRaw || !isValidVoteUrl(urlRaw)) {
+			await interaction.reply(asReply({ content: tr('URL invalide. Elle doit commencer par https:// (le paramètre `{pseudo}` est autorisé).', 'Invalid URL. It must start with https:// (the `{pseudo}` placeholder is allowed).') }));
+			return;
+		}
+		const allEntries = getVoteUrlEntries();
+		const id = generateVoteUrlId(labelRaw);
+		const entry = { id, label: labelRaw, url: urlRaw, cooldownMinutes: minutes, channelId };
+		config.voteUrls = [...allEntries, entry];
+		if (!config.defaultVoteUrlId) {
+			config.defaultVoteUrlId = id;
+			let updatedSubscriptions = 0;
+			for (const sub of subscriptions) {
+				if (!sub.voteUrlId) {
+					sub.voteUrlId = id;
+					if (sub.mode === 'channel') {
+						sub.channelId = channelId || null;
+					}
+					updatedSubscriptions += 1;
+				}
+			}
+			if (updatedSubscriptions > 0) {
+				saveSubscriptions(subscriptions);
+			}
+		}
+		syncLegacyVoteBaseUrl();
+		saveConfig(config);
+		log('info', 'URL ajoutee via /addvote', {
+			userId: interaction.user.id,
+			label: entry.label,
+			url: entry.url,
+			cooldownMinutes: entry.cooldownMinutes,
+			channelId: entry.channelId || null
+		});
+		await interaction.reply(asReply({
+			content: [
+				tr('✅ URL ajoutée : **{label}** (`{id}`)', '✅ Vote URL added: **{label}** (`{id}`)', { label: entry.label, id: entry.id }),
+				tr('Délai : {cooldown}', 'Cooldown: {cooldown}', { cooldown: cooldownLabel(entry.cooldownMinutes) }),
+				entry.channelId
+					? tr('Salon pour le mode ping : <#{channel}>', 'Channel for ping mode: <#{channel}>', { channel: entry.channelId })
+					: tr('Salon pour le mode ping : aucun (MP uniquement)', 'Channel for ping mode: none (DM only)'),
+				entry.url.includes('{pseudo}')
+					? null
+					: tr('Le pseudo sera ajouté à l’URL avec `?pseudo=…`. Utilisez `{pseudo}` dans l’URL pour le placer ailleurs.', 'The username will be appended as `?pseudo=…`. Use `{pseudo}` in the URL to place it elsewhere.')
+			].filter(Boolean).join('\n')
+		}));
+		return;
+	}
+	if (interaction.customId === 'listvote-edit-modal') {
+		const session = listVoteSessions.get(interaction.user.id);
+		const current = session?.selectedId ? getVoteUrlEntries().find(entry => entry.id === session.selectedId) : null;
+		if (!current) {
+			await interaction.reply(asReply({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.') }));
+			return;
+		}
+		const label = interaction.fields.getTextInputValue('edit_display_name')?.trim();
+		const urlStr = interaction.fields.getTextInputValue('edit_vote_url')?.trim();
+		if (!label) {
+			await interaction.reply(asReply({ content: tr('Le nom ne peut pas être vide.', 'Name cannot be empty.') }));
+			return;
+		}
+		if (!urlStr || !isValidVoteUrl(urlStr)) {
+			await interaction.reply(asReply({ content: tr('URL invalide. Elle doit commencer par https:// (le paramètre `{pseudo}` est autorisé).', 'Invalid URL. It must start with https:// (the `{pseudo}` placeholder is allowed).') }));
+			return;
+		}
+		updateVoteEntry(current.id, { label, url: urlStr });
+		log('info', 'URL modifiee via /listvote', { userId: interaction.user.id, id: current.id, label, url: urlStr });
+		const payload = renderListVote(current.id, tr('✅ Entrée mise à jour.', '✅ Entry updated.'));
+		if (interaction.isFromMessage()) {
+			await interaction.update(asUpdate(payload));
+		} else {
+			await interaction.reply(asReply(payload));
+		}
+		return;
+	}
+	if (interaction.customId.startsWith('window-modal|')) {
+		const target = interaction.customId.split('|')[1];
+		const start = parseTimeInput(interaction.fields.getTextInputValue('window_start'));
+		const end = parseTimeInput(interaction.fields.getTextInputValue('window_end'));
+		if (!start || !end) {
+			await interaction.reply(asReply({ content: tr('Heure invalide. Utilisez le format HH:MM, par exemple 08:00 ou 21:30.', 'Invalid time. Use the HH:MM format, e.g. 08:00 or 21:30.') }));
+			return;
+		}
+		if (start === end) {
+			await interaction.reply(asReply({ content: tr('Le début et la fin doivent être différents. Pour toute la journée, choisissez « Toute la journée ».', 'Start and end must differ. For the whole day, pick “All day”.') }));
+			return;
+		}
+		let payload;
+		if (target === 'subscribe') {
+			const session = subscribeSessions.get(interaction.user.id);
+			if (!session) {
+				await interaction.reply(asReply({ content: tr('Session expirée. Relancez /subscribe.', 'Session expired. Run /subscribe again.') }));
+				return;
+			}
+			session.window = { start, end };
+			payload = renderSubscribeForm(session);
+		} else {
+			const mapping = statusSessions.get(interaction.user.id) || {};
+			const editSession = mapping.editSession;
+			const sub = editSession ? subscriptions.find(s => s.id === editSession.subscriptionId && s.userId === interaction.user.id) : null;
+			if (!sub) {
+				await interaction.reply(asReply({ content: tr('Session de modification expirée. Relancez /status.', 'Edit session expired. Run /status again.') }));
+				return;
+			}
+			editSession.window = { start, end };
+			payload = renderStatusEdit(sub, editSession);
+		}
+		if (interaction.isFromMessage()) {
+			await interaction.update(asUpdate(payload));
+		} else {
+			await interaction.reply(asReply(payload));
+		}
+	}
+}
+
+async function handleSelectMenu(interaction) {
+	const value = interaction.values?.[0];
+	const { customId } = interaction;
+	if (customId.startsWith('subscribe-select-')) {
+		const session = subscribeSessions.get(interaction.user.id);
+		if (!session) {
+			await interaction.update(asUpdate({ content: tr('Session expirée. Relancez /subscribe.', 'Session expired. Run /subscribe again.') }));
+			return;
+		}
+		if (getVoteUrlEntries().length === 0) {
+			subscribeSessions.delete(interaction.user.id);
+			await interaction.update(asUpdate({ content: tr('Aucune URL disponible.', 'No vote URL available.') }));
+			return;
+		}
+		if (customId === 'subscribe-select-vote') {
+			session.voteUrlId = value;
+		} else if (customId === 'subscribe-select-window') {
+			if (applyWindowSelection(session, value) === 'custom') {
+				await interaction.showModal(buildWindowModal('subscribe', session.window));
+				return;
+			}
+		} else if (customId === 'subscribe-select-mode') {
+			applyFormSelect(session, 'mode', value);
+		} else if (customId === 'subscribe-select-timezone') {
+			applyFormSelect(session, 'timezone', value);
+		}
+		await interaction.update(asUpdate(renderSubscribeForm(session)));
+		return;
+	}
+	if (customId.startsWith('status-edit-')) {
+		const mapping = statusSessions.get(interaction.user.id) || {};
+		const editSession = mapping.editSession;
+		const sub = editSession ? subscriptions.find(s => s.id === editSession.subscriptionId && s.userId === interaction.user.id) : null;
+		if (!sub) {
+			delete mapping.editSession;
+			await interaction.update(asUpdate({ content: tr('Session de modification expirée. Relancez /status.', 'Edit session expired. Run /status again.') }));
+			return;
+		}
+		if (customId === 'status-edit-window') {
+			if (applyWindowSelection(editSession, value) === 'custom') {
+				await interaction.showModal(buildWindowModal('status', editSession.window));
+				return;
+			}
+		} else if (customId === 'status-edit-mode') {
+			applyFormSelect(editSession, 'mode', value);
+		} else if (customId === 'status-edit-timezone') {
+			applyFormSelect(editSession, 'timezone', value);
+		}
+		await interaction.update(asUpdate(renderStatusEdit(sub, editSession)));
+		return;
+	}
+	if (customId === 'status-select-subscription') {
+		const mapping = statusSessions.get(interaction.user.id) || {};
+		mapping.selectedId = value;
+		statusSessions.set(interaction.user.id, mapping);
+		await interaction.update(asUpdate(renderStatus(interaction.user.id, value)));
+		return;
+	}
+	if (customId === 'unsubscribe-select') {
+		const mapping = statusSessions.get(interaction.user.id) || {};
+		mapping.unsubscribeChoice = value;
+		statusSessions.set(interaction.user.id, mapping);
+		await interaction.update(asUpdate(renderUnsubscribe(interaction.user.id, value)));
+		return;
+	}
+	if (customId === 'listvote-select-entry') {
+		listVoteSessions.set(interaction.user.id, { selectedId: value });
+		await interaction.update(asUpdate(renderListVote(value)));
+		return;
+	}
+	if (customId === 'listvote-cooldown' || customId === 'listvote-channel') {
+		const session = listVoteSessions.get(interaction.user.id);
+		const entry = session?.selectedId ? getVoteUrlEntries().find(e => e.id === session.selectedId) : null;
+		if (!entry) {
+			await interaction.update(asUpdate({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.') }));
+			return;
+		}
+		let notice;
+		if (customId === 'listvote-cooldown') {
+			const minutes = parseInt(value, 10);
+			if (!Number.isFinite(minutes) || minutes <= 0) return;
+			updateVoteEntry(entry.id, { cooldownMinutes: minutes });
+			notice = tr('✅ Délai mis à jour : {cooldown}.', '✅ Cooldown updated: {cooldown}.', { cooldown: cooldownLabel(minutes) });
+		} else {
+			const channelId = value || null;
+			updateVoteEntry(entry.id, { channelId });
+			notice = channelId
+				? tr('✅ Salon mis à jour : <#{channel}>.', '✅ Channel updated: <#{channel}>.', { channel: channelId })
+				: tr('✅ Salon retiré : rappels en MP uniquement.', '✅ Channel removed: DM reminders only.');
+		}
+		log('info', 'URL modifiee via /listvote', { userId: interaction.user.id, id: entry.id, field: customId });
+		await interaction.update(asUpdate(renderListVote(entry.id, notice)));
+	}
+}
+
+async function handleReminderButton(interaction) {
+	const [action, subId] = interaction.customId.split('|');
+	const sub = subscriptions.find(s => s.id === subId);
+	if (!sub) {
+		await interaction.reply(asReply({ content: tr('Abonnement introuvable ou supprimé.', 'Subscription not found or deleted.') }));
+		return;
+	}
+	if (interaction.user.id !== sub.userId) {
+		await interaction.reply(asReply({ content: tr('Ce bouton est réservé au destinataire du rappel.', 'This button is reserved for the reminder recipient.') }));
+		return;
+	}
+	if (action === 'reminder-snooze') {
+		sub.snoozeUntil = Date.now() + SNOOZE_MINUTES * 60 * 1000;
+		saveSubscriptions(subscriptions);
+		log('info', 'Rappel reporte', { userId: sub.userId, subscriptionId: sub.id });
+		const { voteLinkUrl } = await buildVoteLinkForSub(sub);
+		await interaction.update(buildReminderSnoozedPayload(sub, voteLinkUrl));
+		return;
+	}
+	// 'reminder-voted', and 'reminder-reset' from reminders sent by older versions.
+	markVoted(sub);
+	if (sub.lastReminderMessage?.messageId !== interaction.message?.id) {
+		refreshLastReminderMessage(sub);
+	}
+	log('info', 'Vote marque via bouton', { userId: sub.userId, subscriptionId: sub.id });
+	await interaction.update(buildReminderVotedPayload(sub));
+}
+
+async function handleButton(interaction) {
+	const { customId } = interaction;
+	const userId = interaction.user.id;
+	if (customId.startsWith('reminder-')) {
+		await handleReminderButton(interaction);
+		return;
+	}
+	if (customId === 'subscribe-confirm') {
+		const session = subscribeSessions.get(userId);
+		if (!session) {
+			await interaction.update(asUpdate({ content: tr('Session expirée. Relancez /subscribe.', 'Session expired. Run /subscribe again.') }));
+			return;
+		}
+		const voteEntry = session.voteUrlId ? getVoteUrlEntries().find(e => e.id === session.voteUrlId) : null;
+		if (!voteEntry) {
+			await interaction.reply(asReply({ content: tr('Merci de sélectionner un serveur.', 'Please select a server.') }));
+			return;
+		}
+		if (isAlreadySubscribed(userId, voteEntry.id)) {
+			await interaction.reply(asReply({ content: tr('Vous êtes déjà abonné à ce serveur. Utilisez /status pour le modifier.', 'You are already subscribed to this server. Use /status to edit it.') }));
+			return;
+		}
+		if (session.mode === 'channel' && !voteEntry.channelId) {
+			await interaction.reply(asReply({ content: tr('Aucun salon configuré pour ce serveur. Choisissez MP.', 'No channel configured for this server. Pick DM.') }));
+			return;
+		}
+		const record = addSubscription(subscriptions, {
+			userId,
+			voteUrlId: voteEntry.id,
+			window: session.window,
+			mode: session.mode,
+			channelId: session.mode === 'channel' ? voteEntry.channelId : null,
+			timezone: session.timezone,
+			guildId: session.guildId || interaction.guildId || null,
+			lastKnownDisplayName: interaction.member?.displayName || interaction.user.username
+		});
+		saveSubscriptions(subscriptions);
+		subscribeSessions.delete(userId);
+		log('info', 'Utilisateur inscrit aux rappels', {
+			subscriptionId: record.id,
+			userId,
+			mode: record.mode,
+			channelId: record.channelId,
+			guildId: record.guildId,
+			window: record.window,
+			timezone: record.timezone,
+			voteUrlId: record.voteUrlId
+		});
+		const embed = new EmbedBuilder()
+			.setColor(COLOR_SUCCESS)
+			.setTitle(tr('✅ Abonnement créé : {label}', '✅ Subscription created: {label}', { label: voteEntry.label }).slice(0, 256))
+			.setDescription(tr('Gérez vos abonnements à tout moment avec `/status`.', 'Manage your subscriptions anytime with `/status`.'))
+			.addFields(buildSubscriptionField(record, 0, null));
+		await interaction.update(asUpdate({ embeds: [embed] }));
+		return;
+	}
+	if (customId === 'subscribe-cancel') {
+		subscribeSessions.delete(userId);
+		await interaction.update(asUpdate({ content: tr('Formulaire annulé.', 'Form cancelled.') }));
+		return;
+	}
+	if (customId === 'listvote-edit') {
+		const session = listVoteSessions.get(userId);
+		const entry = session?.selectedId ? getVoteUrlEntries().find(e => e.id === session.selectedId) : null;
+		if (!entry) {
+			await interaction.update(asUpdate({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.') }));
+			return;
+		}
+		const modal = new ModalBuilder()
+			.setCustomId('listvote-edit-modal')
+			.setTitle(tr('Modifier une URL de vote', 'Edit a vote URL'))
+			.addComponents(
+				new ActionRowBuilder().addComponents(
+					new TextInputBuilder()
+						.setCustomId('edit_display_name')
+						.setLabel(tr('Nom', 'Name'))
+						.setStyle(TextInputStyle.Short)
+						.setRequired(true)
+						.setMaxLength(100)
+						.setValue(entry.label)
+				),
+				new ActionRowBuilder().addComponents(
+					new TextInputBuilder()
+						.setCustomId('edit_vote_url')
+						.setLabel(tr('URL (peut contenir {pseudo})', 'URL (may contain {pseudo})'))
+						.setStyle(TextInputStyle.Short)
+						.setRequired(true)
+						.setValue(entry.url)
+				)
+			);
+		await interaction.showModal(modal);
+		return;
+	}
+	if (customId === 'listvote-delete') {
+		const session = listVoteSessions.get(userId);
+		const entries = getVoteUrlEntries();
+		const entry = session?.selectedId ? entries.find(e => e.id === session.selectedId) : null;
+		if (!entry) {
+			await interaction.update(asUpdate({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.') }));
+			return;
+		}
+		const remaining = entries.filter(e => e.id !== entry.id);
+		config.voteUrls = remaining;
+		if (!remaining.find(e => e.id === config.defaultVoteUrlId)) {
+			config.defaultVoteUrlId = remaining[0]?.id || null;
+		}
+		syncLegacyVoteBaseUrl();
+		saveConfig(config);
+		let updated = 0;
+		const fallbackEntry = config.defaultVoteUrlId ? remaining.find(e => e.id === config.defaultVoteUrlId) : remaining[0] || null;
+		for (let i = subscriptions.length - 1; i >= 0; i -= 1) {
+			const sub = subscriptions[i];
+			if (sub.voteUrlId === entry.id) {
+				if (fallbackEntry) {
+					sub.voteUrlId = fallbackEntry.id;
+					if (sub.mode === 'channel') {
+						sub.channelId = fallbackEntry.channelId || null;
+					}
+				} else {
+					subscriptions.splice(i, 1);
+				}
+				updated += 1;
+			}
+		}
+		if (updated > 0) {
+			saveSubscriptions(subscriptions);
+		}
+		listVoteSessions.delete(userId);
+		log('info', 'URL supprimee via /listvote', { userId, id: entry.id, subscriptionsUpdated: updated });
+		await interaction.update(asUpdate({
+			content: tr('Entrée {label} supprimée.{extra}', 'Entry {label} deleted.{extra}', {
+				label: entry.label,
+				extra: updated > 0 ? tr(' {count} abonnés mis à jour.', ' {count} subscribers updated.', { count: updated }) : ''
+			})
+		}));
+		return;
+	}
+	if (customId === 'unsubscribe-confirm') {
+		const mapping = statusSessions.get(userId) || {};
+		const choice = mapping.unsubscribeChoice || 'all';
+		let removed = 0;
+		if (choice === 'all') {
+			removed = removeAllSubscriptionsForUser(subscriptions, userId);
+		} else {
+			const target = subscriptions.find(sub => sub.id === choice && sub.userId === userId);
+			if (!target) {
+				await interaction.update(asUpdate({ content: tr('Abonnement introuvable.', 'Subscription not found.') }));
+				return;
+			}
+			if (removeSubscription(subscriptions, target.id)) {
+				removed = 1;
+			}
+		}
+		if (removed > 0) {
+			saveSubscriptions(subscriptions);
+		}
+		statusSessions.delete(userId);
+		log('info', 'Utilisateur desinscrit', { userId, removed, scope: choice });
+		await interaction.update(asUpdate({
+			content: removed > 0
+				? tr('Abonnement{plural} supprimé{plural}.', 'Subscription{plural} deleted.', { plural: removed > 1 ? 's' : '' })
+				: tr('Aucun abonnement supprimé.', 'No subscription deleted.')
+		}));
+		return;
+	}
+	if (customId === 'unsubscribe-cancel') {
+		statusSessions.delete(userId);
+		await interaction.update(asUpdate({ content: tr('Opération annulée.', 'Operation cancelled.') }));
+		return;
+	}
+	if (customId.startsWith('status-')) {
+		const mapping = statusSessions.get(userId) || {};
+		statusSessions.set(userId, mapping);
+		const subs = getUserSubscriptions(userId);
+		const selected = subs.find(sub => sub.id === mapping.selectedId) || subs[0];
+		if (customId === 'status-edit-cancel') {
+			delete mapping.editSession;
+			await interaction.update(asUpdate(renderStatus(userId, mapping.selectedId)));
+			return;
+		}
+		if (customId === 'status-edit-confirm') {
+			const editSession = mapping.editSession;
+			const sub = editSession ? subscriptions.find(s => s.id === editSession.subscriptionId && s.userId === userId) : null;
+			if (!sub) {
+				delete mapping.editSession;
+				await interaction.update(asUpdate({ content: tr('Session de modification expirée. Relancez /status.', 'Edit session expired. Run /status again.') }));
+				return;
+			}
+			const voteEntry = getVoteUrlEntryById(sub.voteUrlId);
+			if (editSession.mode === 'channel' && !voteEntry?.channelId) {
+				await interaction.reply(asReply({ content: tr('Aucun salon configuré pour ce serveur. Choisissez MP.', 'No channel configured for this server. Pick DM.') }));
+				return;
+			}
+			sub.window = editSession.window;
+			sub.timezone = editSession.timezone;
+			sub.mode = editSession.mode;
+			sub.channelId = editSession.mode === 'channel' ? voteEntry.channelId : null;
+			// Changing the delivery settings is the way out of a paused subscription.
+			sub.paused = false;
+			sub.failedDeliveries = 0;
+			saveSubscriptions(subscriptions);
+			log('info', 'Abonnement modifie via status', {
+				userId,
+				subscriptionId: sub.id,
+				mode: sub.mode,
+				channelId: sub.channelId || null,
+				window: sub.window,
+				timezone: sub.timezone
+			});
+			delete mapping.editSession;
+			mapping.selectedId = sub.id;
+			await interaction.update(asUpdate(renderStatus(userId, sub.id, tr('✅ Modifications enregistrées.', '✅ Changes saved.'))));
+			return;
+		}
+		if (!selected) {
+			await interaction.update(asUpdate({ content: tr('Aucun abonnement actif.', 'No active subscriptions.') }));
+			return;
+		}
+		if (customId === 'status-edit') {
+			const entry = getVoteUrlEntryById(selected.voteUrlId);
+			mapping.selectedId = selected.id;
+			mapping.editSession = {
+				subscriptionId: selected.id,
+				window: selected.window ? { ...selected.window } : null,
+				timezone: getSubscriptionTimezone(selected),
+				mode: selected.mode === 'channel' && entry?.channelId ? 'channel' : 'dm'
+			};
+			await interaction.update(asUpdate(renderStatusEdit(selected, mapping.editSession)));
+			return;
+		}
+		if (customId === 'status-resume') {
+			selected.paused = false;
+			selected.failedDeliveries = 0;
+			saveSubscriptions(subscriptions);
+			log('info', 'Abonnement reactive via status', { userId, subscriptionId: selected.id });
+			await interaction.update(asUpdate(renderStatus(userId, selected.id, tr('▶️ Abonnement réactivé.', '▶️ Subscription resumed.'))));
+			return;
+		}
+		if (customId === 'status-delete') {
+			removeSubscription(subscriptions, selected.id);
+			saveSubscriptions(subscriptions);
+			log('info', 'Abonnement supprime via status', { userId, subscriptionId: selected.id });
+			const entry = getVoteUrlEntryById(selected.voteUrlId);
+			mapping.selectedId = null;
+			await interaction.update(asUpdate(renderStatus(userId, null, tr('🗑️ Abonnement {label} supprimé.', '🗑️ Subscription {label} deleted.', { label: entry ? entry.label : '' }))));
+		}
+	}
+}
+
+async function handleCommand(interaction) {
+	const { commandName } = interaction;
+	const userId = interaction.user.id;
+
+	if (commandName === 'addvote') {
+		const cooldown = interaction.options.getInteger('cooldown') || DEFAULT_COOLDOWN_MINUTES;
+		const channel = interaction.options.getChannel('channel');
+		const modal = new ModalBuilder()
+			.setCustomId(`addvote-modal|${cooldown}|${channel?.id || ''}`)
+			.setTitle(tr('Nouvelle URL de vote', 'New vote URL'))
+			.addComponents(
+				new ActionRowBuilder().addComponents(
+					new TextInputBuilder()
+						.setCustomId('display_name')
+						.setLabel(tr('Nom', 'Name'))
+						.setStyle(TextInputStyle.Short)
+						.setRequired(true)
+						.setMaxLength(100)
+				),
+				new ActionRowBuilder().addComponents(
+					new TextInputBuilder()
+						.setCustomId('vote_url')
+						.setLabel(tr('URL de vote (peut contenir {pseudo})', 'Vote URL (may contain {pseudo})'))
+						.setStyle(TextInputStyle.Short)
+						.setRequired(true)
+						.setPlaceholder('https://example.com/vote?user={pseudo}')
+				)
+			);
+		await interaction.showModal(modal);
+		return;
+	}
+
+	if (commandName === 'listvote') {
+		if (getVoteUrlEntries().length === 0) {
+			await interaction.reply(asReply({ content: tr('Aucune URL enregistrée. Utilisez /addvote.', 'No vote URL stored. Use /addvote.') }));
+			return;
+		}
+		listVoteSessions.set(userId, { selectedId: null });
+		await interaction.reply(asReply(renderListVote(null)));
+		return;
+	}
+
+	if (commandName === 'subscribe') {
+		const entries = getVoteUrlEntries();
+		if (entries.length === 0) {
+			await interaction.reply(asReply({ content: tr('Aucune URL de vote n’est configurée. Demandez à un administrateur.', 'No vote URL is configured. Please ask an administrator.') }));
+			return;
+		}
+		const available = entries.filter(e => !isAlreadySubscribed(userId, e.id));
+		if (available.length === 0) {
+			await interaction.reply(asReply({ content: tr('Vous êtes déjà abonné à tous les serveurs. Utilisez /status pour modifier vos abonnements.', 'You are already subscribed to every server. Use /status to edit your subscriptions.') }));
+			return;
+		}
+		const defaultVote = available.find(e => e.id === config.defaultVoteUrlId) || available[0];
+		const session = {
+			userId,
+			guildId: interaction.guildId || null,
+			voteUrlId: defaultVote.id,
+			window: { start: '08:00', end: '20:00' },
+			timezone: isValidTimezone(config.timezone) ? config.timezone : 'Europe/Paris',
+			mode: 'dm'
+		};
+		subscribeSessions.set(userId, session);
+		await interaction.reply(asReply(renderSubscribeForm(session)));
+		return;
+	}
+
+	if (commandName === 'unsubscribe') {
+		const mySubs = getUserSubscriptions(userId);
+		if (mySubs.length === 0) {
+			await interaction.reply(asReply({ content: tr('Aucun abonnement actif.', 'No active subscriptions.') }));
+			return;
+		}
+		const defaultChoice = mySubs[0].id;
+		statusSessions.set(userId, { unsubscribeChoice: defaultChoice });
+		await interaction.reply(asReply(renderUnsubscribe(userId, defaultChoice)));
+		return;
+	}
+
+	if (commandName === 'status') {
+		const mySubs = getUserSubscriptions(userId);
+		const selectedId = mySubs[0]?.id || null;
+		statusSessions.set(userId, { selectedId });
+		await interaction.reply(asReply(renderStatus(userId, selectedId)));
+	}
+}
 
 client.on(Events.InteractionCreate, async (interaction) => {
 	if (interaction.isAutocomplete()) {
@@ -847,912 +1618,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		}
 		return;
 	}
-
-	if (interaction.isModalSubmit()) {
-		try {
-			if (interaction.customId === 'addvote-modal') {
-				const labelRaw = interaction.fields.getTextInputValue('display_name')?.trim();
-				const urlRaw = interaction.fields.getTextInputValue('vote_url')?.trim();
-				const channelRaw = interaction.fields.getTextInputValue('channel_id')?.trim();
-				const cooldownRaw = interaction.fields.getTextInputValue('cooldown')?.trim();
-				if (!labelRaw) {
-					await interaction.reply({ content: tr('Le nom ne peut pas être vide.', 'Name cannot be empty.'), ephemeral: true });
-					return;
-				}
-				if (!urlRaw) {
-					await interaction.reply({ content: tr('L’URL ne peut pas être vide.', 'URL cannot be empty.'), ephemeral: true });
-					return;
-				}
-				try {
-					new URL(urlRaw);
-				} catch {
-					await interaction.reply({ content: tr('URL invalide.', 'Invalid URL.'), ephemeral: true });
-					return;
-				}
-				let channelId = null;
-				if (channelRaw) {
-					const normalized = channelRaw.replace(/[<#>]/g, '');
-					if (!/^\d{15,21}$/.test(normalized)) {
-						await interaction.reply({
-							content: tr('ID de salon invalide. Utilisez l’identifiant numérique du salon.', 'Invalid channel ID. Use the numeric channel identifier.'),
-							ephemeral: true
-						});
-						return;
-					}
-					channelId = normalized;
-				}
-				if (!cooldownRaw) {
-					await interaction.reply({ content: tr('Merci d’indiquer un délai.', 'Please provide a cooldown.'), ephemeral: true });
-					return;
-				}
-				const normalizedCooldown = cooldownRaw.toLowerCase().replace(/\s+/g, '');
-				let minutes = Number.parseInt(normalizedCooldown, 10);
-				if (!Number.isNaN(minutes)) {
-					if (/[a-z]/.test(normalizedCooldown)) {
-						minutes *= 60;
-					}
-				} else {
-					const match = /^(\d+)(h|heure|heures)?$/i.exec(normalizedCooldown);
-					if (match) {
-						minutes = Number.parseInt(match[1], 10) * 60;
-					}
-				}
-				if (!Number.isFinite(minutes)) {
-					const allowedText = COOLDOWN_CHOICES.map(choice => `${choice.minutes} (${choice.label})`).join(', ');
-					await interaction.reply({
-						content: tr('Délai invalide. Choix possibles : {choices}.', 'Invalid cooldown. Allowed values: {choices}.', { choices: allowedText }),
-						ephemeral: true
-					});
-					return;
-				}
-				const allowedMinutes = COOLDOWN_CHOICES.map(choice => choice.minutes);
-				if (!allowedMinutes.includes(minutes)) {
-					const allowedText = COOLDOWN_CHOICES.map(choice => `${choice.minutes} (${choice.label})`).join(', ');
-					await interaction.reply({
-						content: tr('Délai invalide. Choix possibles : {choices}.', 'Invalid cooldown. Allowed values: {choices}.', { choices: allowedText }),
-						ephemeral: true
-					});
-					return;
-				}
-				const chosenCooldown = COOLDOWN_CHOICES.find(choice => choice.minutes === minutes);
-				const allEntries = getVoteUrlEntries();
-				const id = generateVoteUrlId(labelRaw);
-				const entry = { id, label: labelRaw, url: urlRaw, cooldownMinutes: minutes, channelId };
-				config.voteUrls = [...allEntries, entry];
-				let updatedSubscriptions = 0;
-				if (!config.defaultVoteUrlId) {
-					config.defaultVoteUrlId = id;
-					for (const sub of subscriptions) {
-						if (!sub.voteUrlId) {
-							sub.voteUrlId = id;
-							if (sub.mode === 'channel') {
-								sub.channelId = channelId || null;
-							}
-							updatedSubscriptions += 1;
-							scheduleSubscription(sub);
-						}
-					}
-					if (updatedSubscriptions > 0) {
-						saveSubscriptions(subscriptions);
-					}
-				}
-				syncLegacyVoteBaseUrl();
-				saveConfig(config);
-				scheduleAll();
-				log('info', 'URL ajoutee via /addvote', {
-					userId: interaction.user.id,
-					label: entry.label,
-					url: entry.url,
-					cooldownMinutes: entry.cooldownMinutes,
-					channelId: entry.channelId || null
-				});
-				await interaction.reply({
-					content: [
-						tr('URL ajoutée : {label} ({id})', 'Vote URL added: {label} ({id})', { label: entry.label, id: entry.id }),
-						tr('Délai : {minutes} minutes{label}', 'Cooldown: {minutes} minutes{label}', {
-							minutes: entry.cooldownMinutes,
-							label: chosenCooldown ? ` (${chosenCooldown.label})` : ''
-						}),
-						entry.channelId
-							? tr('Salon : <#{channel}>', 'Channel: <#{channel}>', { channel: entry.channelId })
-							: tr('Salon : MP', 'Channel: DM')
-					].join('\n'),
-					ephemeral: true
-				});
-				return;
-			}
-			if (interaction.customId === 'listvote-edit-modal') {
-				const session = listVoteSessions.get(interaction.user.id);
-				if (!session?.selectedId) {
-					await interaction.reply({ content: tr('Session invalide. Relancez /listvote.', 'Invalid session. Run /listvote again.'), ephemeral: true });
-					return;
-				}
-				const entries = getVoteUrlEntries();
-				const idx = entries.findIndex(entry => entry.id === session.selectedId);
-				if (idx === -1) {
-					await interaction.reply({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.'), ephemeral: true });
-					return;
-				}
-				const current = entries[idx];
-				const label = interaction.fields.getTextInputValue('edit_display_name')?.trim();
-				const urlStr = interaction.fields.getTextInputValue('edit_vote_url')?.trim();
-				const cooldownStr = interaction.fields.getTextInputValue('edit_cooldown')?.trim();
-				const channelRaw = interaction.fields.getTextInputValue('edit_channel_id')?.trim();
-				if (!label) {
-					await interaction.reply({ content: tr('Le nom ne peut pas être vide.', 'Name cannot be empty.'), ephemeral: true });
-					return;
-				}
-				if (!urlStr) {
-					await interaction.reply({ content: tr('L’URL ne peut pas être vide.', 'URL cannot be empty.'), ephemeral: true });
-					return;
-				}
-				try {
-					new URL(urlStr);
-				} catch {
-					await interaction.reply({ content: tr('URL invalide.', 'Invalid URL.'), ephemeral: true });
-					return;
-				}
-				const cooldown = parseInt(cooldownStr || '0', 10);
-				if (!Number.isFinite(cooldown) || cooldown <= 0) {
-					await interaction.reply({ content: tr('Le délai doit être un nombre de minutes positif.', 'Cooldown must be a positive number of minutes.'), ephemeral: true });
-					return;
-				}
-				let channelId = null;
-				if (channelRaw) {
-					const normalized = channelRaw.replace(/[<#>]/g, '');
-					if (!/^\d{15,21}$/.test(normalized)) {
-						await interaction.reply({
-							content: tr('ID de salon invalide. Utilisez l’identifiant numérique du salon.', 'Invalid channel ID. Use the numeric channel identifier.'),
-							ephemeral: true
-						});
-						return;
-					}
-					channelId = normalized;
-				}
-				const updatedEntry = { ...current, label, url: urlStr, cooldownMinutes: cooldown, channelId };
-				const newEntries = [...entries];
-				newEntries[idx] = updatedEntry;
-				config.voteUrls = newEntries;
-				syncLegacyVoteBaseUrl();
-				saveConfig(config);
-				let updatedSubs = 0;
-				for (const sub of subscriptions) {
-					if (sub.voteUrlId === current.id) {
-						if (sub.mode === 'channel') {
-							sub.channelId = channelId || null;
-						}
-						updatedSubs += 1;
-						scheduleSubscription(sub);
-					}
-				}
-				if (updatedSubs > 0) {
-					saveSubscriptions(subscriptions);
-				}
-				scheduleAll();
-				if (interaction.message) {
-					try {
-						await interaction.message.edit({
-							content: renderListVoteSummary(updatedEntry),
-							components: buildListVoteComponents(newEntries, session.selectedId)
-						});
-					} catch (err) {
-						log('error', 'Edition de message listvote apres modification', { error: serializeError(err) });
-					}
-				}
-					await interaction.reply({ content: tr('Entrée mise à jour.', 'Entry updated.'), ephemeral: true });
-				return;
-			}
-		} catch (err) {
-			log('error', 'Modal handling error', { error: serializeError(err) });
-			if (!interaction.replied && !interaction.deferred) {
-				try {
-				await interaction.reply({ content: tr('Erreur interne. Merci de réessayer.', 'Internal error. Please try again.'), ephemeral: true });
-				} catch {
-					// ignore
-				}
-			} else if (interaction.deferred) {
-				try {
-				await interaction.editReply({ content: tr('Erreur interne. Merci de réessayer.', 'Internal error. Please try again.'), components: [] });
-				} catch {
-					// ignore
-				}
-			}
+	try {
+		if (interaction.isModalSubmit()) {
+			await handleModalSubmit(interaction);
+		} else if (interaction.isStringSelectMenu() || interaction.isChannelSelectMenu()) {
+			await handleSelectMenu(interaction);
+		} else if (interaction.isButton()) {
+			await handleButton(interaction);
+		} else if (interaction.isChatInputCommand()) {
+			await handleCommand(interaction);
 		}
-		return;
-	}
-
-	if (interaction.isStringSelectMenu()) {
+	} catch (err) {
+		log('error', 'Interaction handler error', { customId: interaction.customId, command: interaction.commandName, error: serializeError(err) });
+		const errorPayload = asReply({ content: tr('Erreur interne. Merci de réessayer.', 'Internal error. Please try again.') });
 		try {
-			if (interaction.customId === 'status-edit-start-time' || interaction.customId === 'status-edit-end-time' || interaction.customId === 'status-edit-mode') {
-				const mapping = statusSessions.get(interaction.user.id) || {};
-				const editSession = mapping.editSession;
-				if (!editSession) {
-					await interaction.update({ content: tr('Session de modification expirée. Relancez /status.', 'Edit session expired. Run /status again.'), components: [] });
-					return;
-				}
-				const sub = subscriptions.find(s => s.id === editSession.subscriptionId && s.userId === interaction.user.id);
-				if (!sub) {
-					delete mapping.editSession;
-					statusSessions.set(interaction.user.id, mapping);
-					await interaction.update({ content: tr('Abonnement introuvable. Relancez /status.', 'Subscription not found. Run /status again.'), components: [] });
-					return;
-				}
-				const value = interaction.values?.[0];
-				if (!value) {
-					await interaction.reply({ content: tr('Sélection invalide.', 'Invalid selection.'), ephemeral: true });
-					return;
-				}
-				if (interaction.customId === 'status-edit-mode') {
-					editSession.mode = value;
-				} else if (interaction.customId === 'status-edit-start-time') {
-					if (value === '__next__') {
-						editSession.startPage = 1;
-					} else if (value === '__prev__') {
-						editSession.startPage = 0;
-					} else {
-						editSession.startTime = value;
-						editSession.startPage = getTimePage(value);
-					}
-				} else if (interaction.customId === 'status-edit-end-time') {
-					if (value === '__next__') {
-						editSession.endPage = 1;
-					} else if (value === '__prev__') {
-						editSession.endPage = 0;
-					} else {
-						editSession.endTime = value;
-						editSession.endPage = getTimePage(value);
-					}
-				}
-				syncSubscribeSessionWindow(editSession);
-				statusSessions.set(interaction.user.id, mapping);
-				await interaction.update({
-					content: renderStatusEditSummary(sub, editSession),
-					components: buildStatusEditComponents(editSession)
-				});
-				return;
-			}
-			if (interaction.customId === 'subscribe-select-vote' || interaction.customId === 'subscribe-select-start-time' || interaction.customId === 'subscribe-select-end-time' || interaction.customId === 'subscribe-select-mode') {
-				const session = subscribeSessions.get(interaction.user.id);
-				if (!session) {
-					await interaction.update({ content: tr('Session expirée. Relancez /subscribe.', 'Session expired. Run /subscribe again.'), components: [] });
-					return;
-				}
-				const entries = getVoteUrlEntries();
-				if (entries.length === 0) {
-					await interaction.update({ content: tr('Aucune URL disponible.', 'No vote URL available.'), components: [] });
-					subscribeSessions.delete(interaction.user.id);
-					return;
-				}
-				if (interaction.customId === 'subscribe-select-vote') {
-					session.voteUrlId = interaction.values[0];
-				} else if (interaction.customId === 'subscribe-select-start-time') {
-					const value = interaction.values[0];
-					if (value === '__next__') {
-						session.startPage = 1;
-					} else if (value === '__prev__') {
-						session.startPage = 0;
-					} else {
-						session.startTime = value;
-						session.startPage = getTimePage(value);
-					}
-				} else if (interaction.customId === 'subscribe-select-end-time') {
-					const value = interaction.values[0];
-					if (value === '__next__') {
-						session.endPage = 1;
-					} else if (value === '__prev__') {
-						session.endPage = 0;
-					} else {
-						session.endTime = value;
-						session.endPage = getTimePage(value);
-					}
-				} else if (interaction.customId === 'subscribe-select-mode') {
-					session.mode = interaction.values[0];
-				}
-		const summary = renderSubscribeSummary(session, entries);
-				await interaction.update({
-					content: summary,
-					components: buildSubscribeComponents(entries, session)
-				});
-				return;
-			}
-			if (interaction.customId === 'listvote-select-entry') {
-				const entries = getVoteUrlEntries();
-				if (entries.length === 0) {
-					await interaction.update({ content: tr('Aucune entrée disponible.', 'No entries available.'), components: [] });
-					return;
-				}
-				const selectedId = interaction.values?.[0];
-				if (!selectedId) {
-					await interaction.reply({ content: tr('Sélection invalide.', 'Invalid selection.'), ephemeral: true });
-					return;
-				}
-				const entry = entries.find(e => e.id === selectedId);
-				if (!entry) {
-					await interaction.reply({ content: tr('Entrée introuvable.', 'Entry not found.'), ephemeral: true });
-					return;
-				}
-				const session = listVoteSessions.get(interaction.user.id) || {};
-				session.selectedId = selectedId;
-				listVoteSessions.set(interaction.user.id, session);
-				await interaction.update({
-					content: renderListVoteSummary(entry),
-					components: buildListVoteComponents(entries, selectedId)
-				});
-				return;
-			}
-			if (interaction.customId === 'unsubscribe-select') {
-				const session = interaction.values?.[0];
-				if (!session) {
-					await interaction.update({ content: tr('Sélection invalide.', 'Invalid selection.'), components: [] });
-					return;
-				}
-				const mapping = statusSessions.get(interaction.user.id) || {};
-				mapping.unsubscribeChoice = session;
-				statusSessions.set(interaction.user.id, mapping);
-				await interaction.update({
-					content: session === 'all'
-						? tr('Choisissez l’abonnement à supprimer (ou Tous).\nSélection : tous vos abonnements.', 'Choose which subscription to delete (or All).\nSelection: all subscriptions.')
-						: tr('Choisissez l’abonnement à supprimer (ou Tous).\nSélection : {id}', 'Choose which subscription to delete (or All).\nSelection: {id}', { id: session }),
-					components: buildUnsubscribeComponents(interaction.user.id, session)
-				});
-				return;
-			}
-			if (interaction.customId === 'status-select-subscription') {
-				const subs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-				if (subs.length === 0) {
-					await interaction.update({ content: tr('Aucun abonnement.', 'No subscriptions.'), components: [] });
-					return;
-				}
-				const selectedId = interaction.values?.[0];
-				if (!selectedId) {
-					await interaction.reply({ content: tr('Sélection invalide.', 'Invalid selection.'), ephemeral: true });
-					return;
-				}
-				const sub = subs.find(s => s.id === selectedId);
-				if (!sub) {
-					await interaction.reply({ content: tr('Abonnement introuvable.', 'Subscription not found.'), ephemeral: true });
-					return;
-				}
-				const mapping = statusSessions.get(interaction.user.id) || {};
-				mapping.selectedId = selectedId;
-				statusSessions.set(interaction.user.id, mapping);
-				await interaction.update({
-					content: formatStatusMessage(interaction.user.id),
-					components: buildStatusComponents(interaction.user.id, selectedId)
-				});
-				return;
-			}
-		} catch (err) {
-			log('error', 'Select menu error', { error: serializeError(err) });
-			if (!interaction.replied && !interaction.deferred) {
-				try {
-					await interaction.reply({ content: tr('Erreur interne. Merci de réessayer.', 'Internal error. Please try again.'), ephemeral: true });
-				} catch {
-					// ignore
-				}
-			}
-		}
-		return;
-	}
-
-	if (interaction.isButton()) {
-		try {
-			if (interaction.customId.startsWith('reminder-reset|')) {
-				const [, subId] = interaction.customId.split('|');
-				const sub = subscriptions.find(s => s.id === subId);
-				if (!sub) {
-					await interaction.reply({ content: tr('Abonnement introuvable ou expiré.', 'Subscription not found or expired.'), ephemeral: true });
-					return;
-				}
-				if (interaction.user.id !== sub.userId) {
-					await interaction.reply({ content: tr('Ce bouton est réservé au destinataire du rappel.', 'This button is reserved for the reminder recipient.'), ephemeral: true });
-					return;
-				}
-				const user = await client.users.fetch(sub.userId);
-				const displayName = await getDisplayNameForUser(sub.guildId, sub.userId, user.username);
-				const voteTarget = buildVoteUrlForUser(displayName, sub.voteUrlId);
-				if (!voteTarget) {
-					await interaction.reply({ content: tr('Aucune URL de vote configurée.', 'No vote URL configured.'), ephemeral: true });
-					return;
-				}
-				sub.lastVotedAt = Date.now();
-				saveSubscriptions(subscriptions);
-				scheduleSubscription(sub);
-				log('info', 'Vote marque via bouton', { userId: sub.userId, subscriptionId: sub.id });
-				const replyPayload = {
-					content: tr('Timer relancé. Cliquez sur “Voter maintenant” pour ouvrir la page.', 'Timer reset. Use “Vote now” to open the page.')
-				};
-				if (interaction.inGuild()) {
-					replyPayload.ephemeral = true;
-				}
-				await interaction.reply(replyPayload);
-				return;
-			}
-			if (interaction.customId === 'subscribe-confirm') {
-				const session = subscribeSessions.get(interaction.user.id);
-				if (!session) {
-					await interaction.update({ content: tr('Session expirée. Relancez /subscribe.', 'Session expired. Run /subscribe again.'), components: [] });
-					return;
-				}
-				syncSubscribeSessionWindow(session);
-				const entries = getVoteUrlEntries();
-				const voteEntry = session.voteUrlId ? entries.find(e => e.id === session.voteUrlId) : null;
-				if (!voteEntry) {
-					await interaction.reply({ content: tr('Merci de sélectionner un serveur.', 'Please select a server.'), ephemeral: true });
-					return;
-				}
-				if (!session.windowStart || !session.windowEnd) {
-					await interaction.reply({ content: tr('Merci de sélectionner une plage horaire.', 'Please select a reminder window.'), ephemeral: true });
-					return;
-				}
-				if (!isHalfHour(session.windowStart) || !isHalfHour(session.windowEnd)) {
-					await interaction.reply({ content: tr('Les horaires doivent être au format HH:MM et multiples de 30 minutes.', 'Times must be HH:MM and in 30-minute increments.'), ephemeral: true });
-					return;
-				}
-				let channelId = undefined;
-				if (session.mode === 'channel') {
-					if (!voteEntry.channelId) {
-						await interaction.reply({ content: tr('Aucun salon configuré pour ce serveur. Choisissez MP ou configurez un salon.', 'No channel configured for this server. Pick DM or configure a channel.'), ephemeral: true });
-						return;
-					}
-					channelId = voteEntry.channelId;
-				}
-				const fields = {
-					window: { start: session.windowStart, end: session.windowEnd },
-					mode: session.mode,
-					channelId: session.mode === 'channel' ? channelId : undefined,
-					guildId: session.guildId || interaction.guildId || undefined,
-					lastKnownDisplayName: interaction.member?.displayName || interaction.user.username,
-					lastVotedAt: Date.now() - getCooldownMsForEntry(voteEntry),
-					voteUrlId: voteEntry.id
-				};
-				const record = addSubscription(subscriptions, { userId: interaction.user.id, ...fields });
-				saveSubscriptions(subscriptions);
-				scheduleSubscription(record);
-				log('info', 'Utilisateur inscrit aux rappels', {
-					subscriptionId: record.id,
-					userId: interaction.user.id,
-					mode: fields.mode,
-					channelId: fields.channelId || null,
-					guildId: fields.guildId || null,
-					window: fields.window || null,
-					voteUrlId: fields.voteUrlId
-				});
-			subscribeSessions.delete(interaction.user.id);
-				await interaction.update({
-					content: [
-						tr('Abonnement créé.', 'Subscription created.'),
-						tr('Serveur : {label} ({id})', 'Server: {label} ({id})', { label: voteEntry.label, id: voteEntry.id }),
-						tr('Plage : {start}-{end}', 'Window: {start}-{end}', { start: fields.window.start, end: fields.window.end }),
-						fields.mode === 'channel' && fields.channelId
-							? tr('Mode : Ping <#{channel}>', 'Mode: Ping <#{channel}>', { channel: fields.channelId })
-							: tr('Mode : MP', 'Mode: DM')
-					].join('\n'),
-					components: []
-				});
-				return;
-			}
-			if (interaction.customId === 'subscribe-cancel') {
-				subscribeSessions.delete(interaction.user.id);
-				await interaction.update({ content: tr('Formulaire annulé.', 'Form cancelled.'), components: [] });
-				return;
-			}
-			if (interaction.customId === 'listvote-edit') {
-				const session = listVoteSessions.get(interaction.user.id);
-				if (!session?.selectedId) {
-					await interaction.update({ content: tr('Sélectionnez une entrée avant de modifier.', 'Select an entry before editing.'), components: [] });
-					return;
-			}
-				const entry = getVoteUrlEntries().find(e => e.id === session.selectedId);
-				if (!entry) {
-					await interaction.update({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.'), components: [] });
-					return;
-				}
-			const modal = new ModalBuilder()
-				.setCustomId('listvote-edit-modal')
-				.setTitle(tr('Modifier une URL de vote', 'Edit a vote URL'))
-				.addComponents(
-					new ActionRowBuilder().addComponents(
-						new TextInputBuilder()
-							.setCustomId('edit_display_name')
-							.setLabel(tr('Nom', 'Name'))
-							.setStyle(TextInputStyle.Short)
-							.setRequired(true)
-							.setValue(entry.label)
-					),
-					new ActionRowBuilder().addComponents(
-							new TextInputBuilder()
-								.setCustomId('edit_vote_url')
-								.setLabel('URL')
-								.setStyle(TextInputStyle.Short)
-								.setRequired(true)
-								.setValue(entry.url)
-						),
-						new ActionRowBuilder().addComponents(
-							new TextInputBuilder()
-								.setCustomId('edit_cooldown')
-								.setLabel(tr('Délai (minutes)', 'Cooldown (minutes)'))
-								.setStyle(TextInputStyle.Short)
-								.setRequired(true)
-								.setValue(String(entry.cooldownMinutes))
-						),
-					new ActionRowBuilder().addComponents(
-						new TextInputBuilder()
-							.setCustomId('edit_channel_id')
-							.setLabel(tr('ID du salon (optionnel)', 'Channel ID (optional)'))
-							.setStyle(TextInputStyle.Short)
-							.setRequired(false)
-							.setValue(entry.channelId || '')
-					)
-				);
-				await interaction.showModal(modal);
-				return;
-			}
-		if (interaction.customId === 'listvote-delete') {
-			const session = listVoteSessions.get(interaction.user.id);
-			if (!session?.selectedId) {
-				await interaction.update({ content: tr('Sélectionnez une entrée avant de supprimer.', 'Select an entry before deleting.'), components: [] });
-				return;
-				}
-				const entries = getVoteUrlEntries();
-				const entry = entries.find(e => e.id === session.selectedId);
-				if (!entry) {
-					await interaction.update({ content: tr('Entrée introuvable. Relancez /listvote.', 'Entry not found. Run /listvote again.'), components: [] });
-					return;
-				}
-				const remaining = entries.filter(e => e.id !== entry.id);
-				config.voteUrls = remaining;
-				if (!remaining.find(e => e.id === config.defaultVoteUrlId)) {
-					config.defaultVoteUrlId = remaining[0]?.id || null;
-				}
-				syncLegacyVoteBaseUrl();
-				saveConfig(config);
-				let updated = 0;
-				const fallbackEntry = config.defaultVoteUrlId ? remaining.find(e => e.id === config.defaultVoteUrlId) : remaining[0] || null;
-				for (let i = subscriptions.length - 1; i >= 0; i -= 1) {
-					const sub = subscriptions[i];
-					if (sub.voteUrlId === entry.id) {
-						if (fallbackEntry) {
-							sub.voteUrlId = fallbackEntry.id;
-							if (sub.mode === 'channel') {
-								sub.channelId = fallbackEntry.channelId || null;
-							}
-							scheduleSubscription(sub);
-						} else {
-							stopSubscriptionTask(sub.id);
-							subscriptions.splice(i, 1);
-						}
-						updated += 1;
-					}
-				}
-				if (updated > 0) {
-					saveSubscriptions(subscriptions);
-				}
-				scheduleAll();
-			listVoteSessions.delete(interaction.user.id);
-		await interaction.update({
-			content: tr('Entrée {label} supprimée.{extra}', 'Entry {label} deleted.{extra}', {
-				label: entry.label,
-				extra: updated > 0 ? tr(' {count} abonnés mis à jour.', ' {count} subscribers updated.', { count: updated }) : ''
-			}),
-			components: []
-		});
-		return;
-	}
-		if (interaction.customId === 'unsubscribe-confirm') {
-			const mapping = statusSessions.get(interaction.user.id) || {};
-			const choice = mapping.unsubscribeChoice || 'all';
-			let removed = 0;
-			if (choice === 'all') {
-				const userSubs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-				for (const sub of userSubs) {
-					stopSubscriptionTask(sub.id);
-				}
-				removed = removeAllSubscriptionsForUser(subscriptions, interaction.user.id);
+			if (interaction.replied || interaction.deferred) {
+				await interaction.followUp(errorPayload);
 			} else {
-				const target = subscriptions.find(sub => sub.id === choice && sub.userId === interaction.user.id);
-				if (!target) {
-					await interaction.update({ content: tr('Abonnement introuvable.', 'Subscription not found.'), components: [] });
-					return;
-				}
-				stopSubscriptionTask(target.id);
-				if (removeSubscription(subscriptions, target.id)) {
-					removed = 1;
-				}
+				await interaction.reply(errorPayload);
 			}
-			if (removed > 0) {
-				saveSubscriptions(subscriptions);
-				scheduleAll();
-			}
-			statusSessions.delete(interaction.user.id);
-			log('info', 'Utilisateur desinscrit', { userId: interaction.user.id, removed, scope: choice });
-			await interaction.update({
-				content: removed > 0
-					? tr('Abonnement{plural} supprimé{plural}.', 'Subscription{plural} deleted.', { plural: removed > 1 ? 's' : '' })
-					: tr('Aucun abonnement supprimé.', 'No subscription deleted.'),
-				components: []
-			});
-			return;
+		} catch {
+			// ignore
 		}
-		if (interaction.customId === 'unsubscribe-cancel') {
-			statusSessions.delete(interaction.user.id);
-			await interaction.update({ content: tr('Opération annulée.', 'Operation cancelled.'), components: [] });
-			return;
-		}
-		if (interaction.customId === 'status-edit') {
-			const subs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-			if (subs.length === 0) {
-				await interaction.update({ content: tr('Aucun abonnement actif.', 'No active subscriptions.'), components: [] });
-				return;
-			}
-			const mapping = statusSessions.get(interaction.user.id) || {};
-			if (!mapping.selectedId || !subscriptions.find(sub => sub.id === mapping.selectedId && sub.userId === interaction.user.id)) {
-				mapping.selectedId = subs[0].id;
-			}
-			statusSessions.set(interaction.user.id, mapping);
-			const sub = subscriptions.find(s => s.id === mapping.selectedId && s.userId === interaction.user.id);
-			if (!sub) {
-				await interaction.update({ content: tr('Abonnement introuvable.', 'Subscription not found.'), components: [] });
-				return;
-			}
-			const defaultStart = sub.window?.start || '08:00';
-			const defaultEnd = sub.window?.end || '20:00';
-			const editSession = {
-				subscriptionId: sub.id,
-				startTime: defaultStart,
-				endTime: defaultEnd,
-				startPage: getTimePage(defaultStart),
-				endPage: getTimePage(defaultEnd),
-				mode: sub.mode === 'channel' ? 'channel' : 'dm'
-			};
-			syncSubscribeSessionWindow(editSession);
-			mapping.editSession = editSession;
-			statusSessions.set(interaction.user.id, mapping);
-			await interaction.update({
-				content: renderStatusEditSummary(sub, editSession),
-				components: buildStatusEditComponents(editSession)
-			});
-			return;
-		}
-		if (interaction.customId === 'status-edit-confirm') {
-			const mapping = statusSessions.get(interaction.user.id) || {};
-			const editSession = mapping.editSession;
-			if (!editSession) {
-				await interaction.update({ content: tr('Session de modification expirée. Relancez /status.', 'Edit session expired. Run /status again.'), components: [] });
-				return;
-			}
-			const sub = subscriptions.find(s => s.id === editSession.subscriptionId && s.userId === interaction.user.id);
-			if (!sub) {
-				delete mapping.editSession;
-				statusSessions.set(interaction.user.id, mapping);
-				await interaction.update({ content: tr('Abonnement introuvable. Relancez /status.', 'Subscription not found. Run /status again.'), components: [] });
-				return;
-			}
-			if (!editSession.windowStart || !editSession.windowEnd) {
-				await interaction.reply({ content: tr('Merci de sélectionner une plage horaire.', 'Please select a reminder window.'), ephemeral: true });
-				return;
-			}
-			if (!isHalfHour(editSession.windowStart) || !isHalfHour(editSession.windowEnd)) {
-				await interaction.reply({ content: tr('Les horaires doivent être au format HH:MM et multiples de 30 minutes.', 'Times must be HH:MM and in 30-minute increments.'), ephemeral: true });
-				return;
-			}
-			const voteEntry = getVoteUrlEntryById(sub.voteUrlId);
-			let channelId = undefined;
-			if (editSession.mode === 'channel') {
-				if (!voteEntry?.channelId) {
-					await interaction.reply({ content: tr('Aucun salon configuré pour ce serveur. Choisissez MP ou configurez un salon.', 'No channel configured for this server. Pick DM or configure a channel.'), ephemeral: true });
-					return;
-				}
-				channelId = voteEntry.channelId;
-			}
-			sub.window = { start: editSession.windowStart, end: editSession.windowEnd };
-			sub.mode = editSession.mode;
-			sub.channelId = editSession.mode === 'channel' ? channelId : undefined;
-			saveSubscriptions(subscriptions);
-			scheduleSubscription(sub);
-			log('info', 'Abonnement modifie via status', {
-				userId: interaction.user.id,
-				subscriptionId: sub.id,
-				mode: sub.mode,
-				channelId: sub.channelId || null,
-				window: sub.window
-			});
-			delete mapping.editSession;
-			mapping.selectedId = sub.id;
-			statusSessions.set(interaction.user.id, mapping);
-			const content = `${tr('Modifications enregistrées.', 'Changes saved.')}\n\n${formatStatusMessage(interaction.user.id)}`;
-			await interaction.update({
-				content,
-				components: buildStatusComponents(interaction.user.id, sub.id)
-			});
-			return;
-		}
-		if (interaction.customId === 'status-edit-cancel') {
-			const mapping = statusSessions.get(interaction.user.id) || {};
-			delete mapping.editSession;
-			statusSessions.set(interaction.user.id, mapping);
-			const userSubs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-			if (userSubs.length === 0) {
-				await interaction.update({ content: tr('Aucun abonnement actif.', 'No active subscriptions.'), components: [] });
-				return;
-			}
-			const selectedId = mapping.selectedId && userSubs.some(sub => sub.id === mapping.selectedId)
-				? mapping.selectedId
-				: userSubs[0].id;
-			mapping.selectedId = selectedId;
-			statusSessions.set(interaction.user.id, mapping);
-			await interaction.update({
-				content: formatStatusMessage(interaction.user.id),
-				components: buildStatusComponents(interaction.user.id, selectedId)
-			});
-			return;
-		}
-		if (interaction.customId === 'status-delete') {
-			const subs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-			if (subs.length === 0) {
-				await interaction.update({ content: tr('Aucun abonnement actif.', 'No active subscriptions.'), components: [] });
-				return;
-			}
-			const mapping = statusSessions.get(interaction.user.id) || {};
-			let selectedId = mapping.selectedId;
-			if (!selectedId || !subs.find(sub => sub.id === selectedId)) {
-				selectedId = subs[0].id;
-			}
-			const target = subscriptions.find(sub => sub.id === selectedId && sub.userId === interaction.user.id);
-			if (!target) {
-				await interaction.update({ content: tr('Abonnement introuvable.', 'Subscription not found.'), components: [] });
-				return;
-			}
-			stopSubscriptionTask(target.id);
-			removeSubscription(subscriptions, target.id);
-			saveSubscriptions(subscriptions);
-			scheduleAll();
-			log('info', 'Abonnement supprime via status', { userId: interaction.user.id, subscriptionId: target.id });
-			const remaining = subscriptions.filter(sub => sub.userId === interaction.user.id);
-			if (remaining.length === 0) {
-				statusSessions.delete(interaction.user.id);
-				await interaction.update({ content: tr('Tous vos abonnements ont été supprimés.', 'All of your subscriptions have been removed.'), components: [] });
-				return;
-			}
-			const newSelected = remaining[0].id;
-			const mappingAfterDelete = statusSessions.get(interaction.user.id) || {};
-			mappingAfterDelete.selectedId = newSelected;
-			statusSessions.set(interaction.user.id, mappingAfterDelete);
-			await interaction.update({
-				content: formatStatusMessage(interaction.user.id),
-				components: buildStatusComponents(interaction.user.id, newSelected)
-			});
-			return;
-		}
-		} catch (err) {
-			log('error', 'Button handler error', { error: serializeError(err) });
-			if (!interaction.replied && !interaction.deferred) {
-				try {
-					await interaction.reply({ content: tr('Erreur interne. Merci de réessayer.', 'Internal error. Please try again.'), ephemeral: true });
-				} catch {
-					// ignore
-				}
-			}
-		}
-		return;
-	}
-
-	if (!interaction.isChatInputCommand()) return;
-
-	const { commandName } = interaction;
-
-	if (commandName === 'addvote') {
-		const modal = new ModalBuilder()
-			.setCustomId('addvote-modal')
-			.setTitle(tr('Nouvelle URL de vote', 'New vote URL'));
-		const nameInput = new TextInputBuilder()
-			.setCustomId('display_name')
-			.setLabel(tr('Nom', 'Name'))
-			.setStyle(TextInputStyle.Short)
-			.setRequired(true);
-		const urlInput = new TextInputBuilder()
-			.setCustomId('vote_url')
-			.setLabel(tr('URL de vote', 'Vote URL'))
-			.setStyle(TextInputStyle.Short)
-			.setRequired(true);
-		const cooldownInput = new TextInputBuilder()
-			.setCustomId('cooldown')
-			.setLabel(tr('Délai (minutes)', 'Cooldown (minutes)'))
-			.setStyle(TextInputStyle.Short)
-			.setRequired(true)
-			.setPlaceholder(tr('60, 120, 180, 240, 720, 1440', '60, 120, 180, 240, 720, 1440'));
-		const channelInput = new TextInputBuilder()
-			.setCustomId('channel_id')
-			.setLabel(tr('ID du salon (optionnel)', 'Channel ID (optional)'))
-			.setStyle(TextInputStyle.Short)
-			.setRequired(false)
-			.setPlaceholder(tr('ex : 123456789012345678', 'e.g. 123456789012345678'));
-		modal.addComponents(
-			new ActionRowBuilder().addComponents(nameInput),
-			new ActionRowBuilder().addComponents(urlInput),
-			new ActionRowBuilder().addComponents(cooldownInput),
-			new ActionRowBuilder().addComponents(channelInput)
-		);
-		await interaction.showModal(modal);
-		return;
-	}
-
-	if (commandName === 'listvote') {
-		const entries = getVoteUrlEntries();
-		if (entries.length === 0) {
-			await interaction.reply({ content: tr('Aucune URL enregistrée.', 'No vote URL stored.'), ephemeral: true });
-			return;
-		}
-		listVoteSessions.set(interaction.user.id, { selectedId: null });
-		await interaction.reply({
-			content: tr('Sélectionnez une entrée pour la modifier ou la supprimer.', 'Select an entry to edit or delete it.'),
-			components: buildListVoteComponents(entries, null),
-			ephemeral: true
-		});
-		return;
-	}
-
-	if (commandName === 'subscribe') {
-		const entries = getVoteUrlEntries();
-		if (entries.length === 0) {
-			await interaction.reply({ content: tr('Aucune URL de vote n’est configurée. Demandez à un administrateur.', 'No vote URL is configured. Please ask an administrator.'), ephemeral: true });
-			return;
-		}
-		const defaultVote = config.defaultVoteUrlId && entries.find(e => e.id === config.defaultVoteUrlId)
-			? config.defaultVoteUrlId
-			: entries[0].id;
-		const defaultStart = '08:00';
-		const defaultEnd = '20:00';
-	const session = {
-		userId: interaction.user.id,
-		guildId: interaction.guildId || undefined,
-		voteUrlId: defaultVote,
-		startTime: defaultStart,
-		endTime: defaultEnd,
-		startPage: getTimePage(defaultStart),
-		endPage: getTimePage(defaultEnd),
-		mode: 'dm'
-	};
-		syncSubscribeSessionWindow(session);
-		subscribeSessions.set(interaction.user.id, session);
-		await interaction.reply({
-			content: renderSubscribeSummary(session, entries),
-			components: buildSubscribeComponents(entries, session),
-			ephemeral: true
-		});
-		return;
-	}
-
-	if (commandName === 'unsubscribe') {
-		const mySubs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-		if (mySubs.length === 0) {
-			await interaction.reply({ content: tr('Aucun abonnement actif.', 'No active subscriptions.'), ephemeral: true });
-			return;
-		}
-		const defaultChoice = mySubs[0]?.id || 'all';
-		statusSessions.set(interaction.user.id, { unsubscribeChoice: defaultChoice });
-		await interaction.reply({
-			content: tr('Choisissez l’abonnement à supprimer (ou Tous).', 'Choose which subscription to delete (or All).'),
-			components: buildUnsubscribeComponents(interaction.user.id, defaultChoice),
-			ephemeral: true
-		});
-		return;
-	}
-
-	if (commandName === 'status') {
-		const mySubs = subscriptions.filter(sub => sub.userId === interaction.user.id);
-		if (mySubs.length === 0) {
-			await interaction.reply({ content: tr('Aucun abonnement actif.', 'No active subscriptions.'), ephemeral: true });
-			return;
-		}
-		const selectedId = mySubs[0]?.id || null;
-		statusSessions.set(interaction.user.id, { selectedId });
-		await interaction.reply({
-			content: formatStatusMessage(interaction.user.id),
-			components: buildStatusComponents(interaction.user.id, selectedId),
-			ephemeral: true
-		});
-		return;
 	}
 });
 
@@ -1766,11 +1653,13 @@ app.get('/v', async (req, res) => {
 		if (!t) return res.status(400).send('Missing token');
 		const payload = verifyToken(String(t));
 		if (!payload?.uid) return res.status(400).send('Invalid token');
-		const sub = subscriptions.find(s => s.userId === payload.uid);
+		// Tokens issued before the subscription id was included only carry the user id.
+		const sub = payload.sid
+			? subscriptions.find(s => s.id === payload.sid && s.userId === payload.uid)
+			: subscriptions.find(s => s.userId === payload.uid);
 		if (!sub) return res.status(404).send('Not subscribed');
-		// Update last voted time
-		sub.lastVotedAt = Date.now();
-		saveSubscriptions(subscriptions);
+		markVoted(sub);
+		refreshLastReminderMessage(sub);
 		// Build redirect URL with current display name
 		const user = await client.users.fetch(sub.userId);
 		const displayName = await getDisplayNameForUser(sub.guildId, sub.userId, user.username);
@@ -1778,7 +1667,7 @@ app.get('/v', async (req, res) => {
 		if (!target) {
 			return res.status(503).send('Vote URL not configured');
 		}
-		log('info', 'Redirection de vote', { userId: sub.userId, guildId: sub.guildId || null });
+		log('info', 'Redirection de vote', { userId: sub.userId, subscriptionId: sub.id, guildId: sub.guildId || null });
 		res.redirect(target);
 	} catch (e) {
 		log('error', 'Erreur lors de la redirection de vote', { error: serializeError(e) });
@@ -1792,7 +1681,3 @@ client.login(token);
 app.listen(PORT, () => {
 	log('info', 'HTTP redirect server listening', { port: PORT });
 });
-
-
-
-

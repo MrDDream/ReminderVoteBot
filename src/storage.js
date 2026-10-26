@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { readJson, writeJsonAtomic } from './jsonFile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,7 +36,13 @@ function normalizeSubscription(raw, fallbackPrefix, index) {
 		guildId: raw.guildId || null,
 		lastKnownDisplayName: raw.lastKnownDisplayName || null,
 		lastVotedAt: typeof raw.lastVotedAt === 'number' ? raw.lastVotedAt : null,
-		lastReminderAt: typeof raw.lastReminderAt === 'number' ? raw.lastReminderAt : null
+		lastReminderAt: typeof raw.lastReminderAt === 'number' ? raw.lastReminderAt : null,
+		snoozeUntil: typeof raw.snoozeUntil === 'number' ? raw.snoozeUntil : null,
+		failedDeliveries: typeof raw.failedDeliveries === 'number' ? raw.failedDeliveries : 0,
+		paused: raw.paused === true,
+		lastReminderMessage: raw.lastReminderMessage && raw.lastReminderMessage.channelId && raw.lastReminderMessage.messageId
+			? { channelId: raw.lastReminderMessage.channelId, messageId: raw.lastReminderMessage.messageId }
+			: null
 	};
 }
 
@@ -45,53 +52,43 @@ export function loadSubscriptions() {
 	ensureDataDir();
 	if (!fs.existsSync(subsPath)) {
 		if (fs.existsSync(legacySubsPath)) {
-			try {
-				fs.copyFileSync(legacySubsPath, subsPath);
-			} catch {
-				fs.writeFileSync(subsPath, JSON.stringify([], null, 2), 'utf8');
-			}
+			fs.copyFileSync(legacySubsPath, subsPath);
 		} else {
-			fs.writeFileSync(subsPath, JSON.stringify([], null, 2), 'utf8');
+			saveSubscriptions([]);
 		}
 	}
-	try {
-		const raw = fs.readFileSync(subsPath, 'utf8');
-		const data = JSON.parse(raw);
-		if (Array.isArray(data)) {
-			if (data.length === 0) return [];
-			// Detect legacy schema
-			if (typeof data[0] === 'string') {
-				// v1 to v4: create basic subscription per user
-				const migrated = data.map((userId, idx) => normalizeSubscription({ userId }, 'sub', idx));
-				saveSubscriptions(migrated);
-				return migrated;
-			}
-			const migrated = [];
-			let idx = 0;
-			for (const entry of data) {
-				if (!entry) continue;
-				if (Array.isArray(entry.subscriptions)) {
-					for (const sub of entry.subscriptions) {
-						migrated.push(normalizeSubscription({ ...sub, userId: entry.userId }, 'sub', idx++));
-					}
-					continue;
-				}
-				migrated.push(normalizeSubscription(entry, 'sub', idx++));
-			}
-			if (migrated.length !== data.length) {
-				saveSubscriptions(migrated);
-			}
-			return migrated;
-		}
-		return [];
-	} catch {
-		return [];
+	// readJson throws on unrecoverable corruption: better to stop than to
+	// start with an empty list and overwrite the real data on the next save.
+	const data = readJson(subsPath);
+	if (!Array.isArray(data) || data.length === 0) return [];
+	// Detect legacy schema
+	if (typeof data[0] === 'string') {
+		// v1 to v4: create basic subscription per user
+		const migrated = data.map((userId, idx) => normalizeSubscription({ userId }, 'sub', idx));
+		saveSubscriptions(migrated);
+		return migrated;
 	}
+	const migrated = [];
+	let idx = 0;
+	for (const entry of data) {
+		if (!entry) continue;
+		if (Array.isArray(entry.subscriptions)) {
+			for (const sub of entry.subscriptions) {
+				migrated.push(normalizeSubscription({ ...sub, userId: entry.userId }, 'sub', idx++));
+			}
+			continue;
+		}
+		migrated.push(normalizeSubscription(entry, 'sub', idx++));
+	}
+	if (migrated.length !== data.length) {
+		saveSubscriptions(migrated);
+	}
+	return migrated;
 }
 
 export function saveSubscriptions(list) {
 	ensureDataDir();
-	fs.writeFileSync(subsPath, JSON.stringify(list, null, 2), 'utf8');
+	writeJsonAtomic(subsPath, list);
 }
 
 export function addSubscription(list, subscription) {

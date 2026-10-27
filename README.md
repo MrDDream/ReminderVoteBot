@@ -35,11 +35,11 @@ cd ReminderVoteBot
 ```env
 DISCORD_TOKEN=your_discord_bot_token
 CLIENT_ID=your_client_id
-GUILD_ID=your_guild_id  # Optional, for guild-specific commands
+GUILD_ID=your_guild_id  # Required: the Discord server the bot serves
 DEFAULT_TZ=Europe/Paris  # Default timezone
 BOT_LANG=en  # or 'fr' for French
 PUBLIC_BASE_URL=https://your-domain.com  # Optional, for vote redirect
-MARK_SECRET=your_secret_key  # Optional, for secure vote tokens
+MARK_SECRET=at_least_32_random_characters  # Required with PUBLIC_BASE_URL (openssl rand -hex 32)
 PORT=3000  # Optional, default is 3000
 ```
 
@@ -81,11 +81,11 @@ npm start
 |----------|----------|-------------|---------|
 | `DISCORD_TOKEN` | Yes | Your Discord bot token | - |
 | `CLIENT_ID` | Yes | Your Discord application client ID | - |
-| `GUILD_ID` | No | Guild ID for guild-specific commands (faster deployment) | - |
+| `GUILD_ID` | Yes | ID of the Discord server the bot serves: commands are deployed there only, and admin commands only work there | - |
 | `DEFAULT_TZ` | No | Default timezone for reminders | `Europe/Paris` |
 | `BOT_LANG` | No | Bot language (`en` or `fr`) | `fr` |
 | `PUBLIC_BASE_URL` | No | Base URL for vote redirect service | - |
-| `MARK_SECRET` | No | Secret key for vote token signing | - |
+| `MARK_SECRET` | With `PUBLIC_BASE_URL` | Secret key (32+ characters) for vote token signing; the bot refuses to start without it when `PUBLIC_BASE_URL` is set | - |
 | `PORT` | No | HTTP server port | `3000` |
 
 ### Data Storage
@@ -139,14 +139,16 @@ Add a new vote URL. Requires "Manage Server" permission.
 
 A form then asks for:
 - **Name**: Display name for the vote server
-- **URL**: The vote URL. Put `{pseudo}` where the user's display name must go (e.g. `https://site/vote/{pseudo}`); without it, `?pseudo=<name>` is appended to the URL
+- **URL**: The vote URL (`https://`, 400 characters max). Put `{pseudo}` where the user's display name must go (e.g. `https://site/vote/{pseudo}`); without it, `?pseudo=<name>` is appended to the URL
+
+At most 25 vote URLs can be configured.
 
 #### `/listvote`
 List and manage existing vote URLs. You can:
 - View all configured vote servers and their subscriber count
 - Change the cooldown and the ping channel directly from menus
 - Edit the name and URL
-- Delete vote servers
+- Delete vote servers (their subscriptions are deleted too)
 
 ## How It Works
 
@@ -163,15 +165,22 @@ List and manage existing vote URLs. You can:
 
 Use `docker-compose-dev.yml` to build the image from the local sources.
 
-Run the unit tests with `npm test`.
+Run the unit tests with `npm test` and the linter with `npm run lint`.
 
 ### Production
 
 The `docker-compose.yml` file is configured for production use with:
 - Automatic command deployment on startup
 - Volume persistence for data
-- Health check endpoint at `/health`
+- Docker health check on `/health`
+- Clean shutdown on `docker stop` (pending changes are saved)
 - Port mapping for the HTTP server
+
+The container runs as the unprivileged `node` user. Images published before this change ran as root: if your `bot_data` volume comes from such an image, give it to the `node` user once (the bot refuses to start and shows this command otherwise):
+
+```bash
+docker compose run --rm --user root bot chown -R node:node /app/data
+```
 
 ### Docker image (CI)
 
@@ -192,6 +201,10 @@ ReminderVoteBot/
 │   ├── storage.js        # Subscription storage
 │   ├── schedule.js       # Reminder scheduling rules (time windows, cooldown, snooze)
 │   ├── jsonFile.js       # Atomic JSON writes with .bak backup
+│   ├── token.js          # Signed /v vote links
+│   ├── voteUrl.js        # Vote URL validation and ids
+│   ├── constants.js      # Values shared with deploy-commands.js
+│   ├── paths.js          # Data directory
 │   └── deploy-commands.js # Discord command deployment
 ├── data/                 # Data directory (created at runtime)
 │   ├── config.json       # Bot configuration
@@ -225,7 +238,8 @@ ReminderVoteBot/
 ### Vote Redirect Service
 If `PUBLIC_BASE_URL` is configured:
 - The bot provides a secure redirect service at `/v?t=<token>`
-- Tokens are signed with HMAC-SHA256 and identify the subscription, so the vote is recorded on the right server
+- Tokens are signed with HMAC-SHA256 (`MARK_SECRET`), identify the subscription so the vote is recorded on the right server, and expire after 7 days
+- In channel ping mode, the **Vote now** button gives the subscriber their personal link privately, so other members cannot vote in their place
 - Automatically tracks when users vote and updates the reminder message
 - Falls back to direct vote URL if not configured
 
@@ -244,8 +258,8 @@ If `PUBLIC_BASE_URL` is configured:
 
 ### Commands not appearing
 - Run `npm run deploy:commands` to deploy commands
-- Wait up to 1 hour for global commands to propagate
-- Use `GUILD_ID` for instant guild-specific command deployment
+- Commands only exist on the `GUILD_ID` server (deployment also removes global commands left by older versions)
+- `/addvote` and `/listvote` require the "Manage Server" permission on that server
 
 ## License
 

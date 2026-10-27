@@ -548,35 +548,63 @@ footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; g
 					<p><span lang="fr">Sur le <a href="https://discord.com/developers/applications">Discord Developer Portal</a>, créez une application, récupérez son <strong>token</strong> (onglet Bot) et son <strong>Application ID</strong>, puis invitez-la sur votre serveur avec les scopes <code>bot</code> et <code>applications.commands</code>.</span><span lang="en">On the <a href="https://discord.com/developers/applications">Discord Developer Portal</a>, create an application, copy its <strong>token</strong> (Bot tab) and its <strong>Application ID</strong>, then invite it to your server with the <code>bot</code> and <code>applications.commands</code> scopes.</span></p>
 				</div>
 				<div class="install-step">
-					<h3><span lang="fr">2. Récupérer le fichier Docker Compose</span><span lang="en">2. Get the Docker Compose file</span></h3>
-					<div class="code"><button class="copy" type="button">Copier</button><pre><code>mkdir remindervotebot &amp;&amp; cd remindervotebot
-curl -O https://raw.githubusercontent.com/MrDDream/ReminderVoteBot/main/docker-compose.yml</code></pre></div>
+					<h3><span lang="fr">2. Créer le fichier <code>docker-compose.yml</code></span><span lang="en">2. Create the <code>docker-compose.yml</code> file</span></h3>
+					<p><span lang="fr">Dans un dossier dédié (par exemple <code>remindervotebot/</code>), créez ce fichier et remplacez les trois premières valeurs.</span><span lang="en">In a dedicated folder (for example <code>remindervotebot/</code>), create this file and replace the first three values.</span></p>
+					<div class="code" lang="fr"><button class="copy" type="button">Copier</button><pre><code>services:
+  bot:
+    image: ghcr.io/mrddream/remindervotebot:latest
+    container_name: ReminderVoteBot
+    restart: unless-stopped
+    init: true
+    <span class="c"># Enregistre les commandes slash sur votre serveur, puis lance le bot</span>
+    command: sh -c "node src/deploy-commands.js &amp;&amp; exec node src/index.js"
+    environment:
+      DISCORD_TOKEN: "token_du_bot"
+      CLIENT_ID: "application_id"
+      GUILD_ID: "id_de_votre_serveur_discord"
+      BOT_LANG: "fr"
+      DEFAULT_TZ: "Europe/Paris"
+      <span class="c"># Optionnel : vote en un clic, décommentez les deux lignes
+      # (le bot doit être joignable en HTTPS sur ce domaine)
+      # PUBLIC_BASE_URL: "https://vote.example.com"
+      # MARK_SECRET: "32 caractères minimum, ex. : openssl rand -hex 32"</span>
+    volumes:
+      - bot_data:/app/data
+    <span class="c"># Utile uniquement pour le vote en un clic</span>
+    ports:
+      - "3000:3000"
+
+volumes:
+  bot_data:</code></pre></div>
+					<div class="code" lang="en"><button class="copy" type="button">Copy</button><pre><code>services:
+  bot:
+    image: ghcr.io/mrddream/remindervotebot:latest
+    container_name: ReminderVoteBot
+    restart: unless-stopped
+    init: true
+    <span class="c"># Registers the slash commands on your server, then starts the bot</span>
+    command: sh -c "node src/deploy-commands.js &amp;&amp; exec node src/index.js"
+    environment:
+      DISCORD_TOKEN: "bot_token"
+      CLIENT_ID: "application_id"
+      GUILD_ID: "your_discord_server_id"
+      BOT_LANG: "en"
+      DEFAULT_TZ: "Europe/London"
+      <span class="c"># Optional: one-click voting, uncomment both lines
+      # (the bot must be reachable over HTTPS on this domain)
+      # PUBLIC_BASE_URL: "https://vote.example.com"
+      # MARK_SECRET: "32+ characters, e.g. openssl rand -hex 32"</span>
+    volumes:
+      - bot_data:/app/data
+    <span class="c"># Only needed for one-click voting</span>
+    ports:
+      - "3000:3000"
+
+volumes:
+  bot_data:</code></pre></div>
 				</div>
 				<div class="install-step">
-					<h3><span lang="fr">3. Créer le fichier <code>.env</code> à côté</span><span lang="en">3. Create the <code>.env</code> file next to it</span></h3>
-					<div class="code" lang="fr"><button class="copy" type="button">Copier</button><pre><code>DISCORD_TOKEN=token_du_bot
-CLIENT_ID=application_id
-GUILD_ID=id_de_votre_serveur_discord
-BOT_LANG=fr
-DEFAULT_TZ=Europe/Paris
-
-<span class="c"># Optionnel : vote en un clic (le bot doit être joignable sur ce domaine).
-# Décommentez les deux lignes ; MARK_SECRET : 32 caractères minimum (openssl rand -hex 32)
-# PUBLIC_BASE_URL=https://vote.example.com
-# MARK_SECRET=</span></code></pre></div>
-					<div class="code" lang="en"><button class="copy" type="button">Copy</button><pre><code>DISCORD_TOKEN=bot_token
-CLIENT_ID=application_id
-GUILD_ID=your_discord_server_id
-BOT_LANG=en
-DEFAULT_TZ=Europe/London
-
-<span class="c"># Optional: one-click voting (the bot must be reachable on this domain).
-# Uncomment both lines; MARK_SECRET: 32+ characters (openssl rand -hex 32)
-# PUBLIC_BASE_URL=https://vote.example.com
-# MARK_SECRET=</span></code></pre></div>
-				</div>
-				<div class="install-step">
-					<h3><span lang="fr">4. Démarrer</span><span lang="en">4. Start</span></h3>
+					<h3><span lang="fr">3. Démarrer</span><span lang="en">3. Start</span></h3>
 					<div class="code"><button class="copy" type="button">Copier</button><pre><code>docker compose up -d</code></pre></div>
 				</div>
 				<p class="note">

@@ -37,28 +37,39 @@ Le bot est distribué en image Docker prête à l'emploi (`linux/amd64` et `linu
    (permissions : voir les salons, envoyer des messages, intégrer des liens)
 4. Récupérez l'**ID de votre serveur** : activez le *Mode développeur* dans les paramètres Discord, puis clic droit sur le serveur → *Copier l'identifiant du serveur*.
 
-### 2. Récupérer le fichier Docker Compose
+### 2. Créer le fichier `docker-compose.yml`
 
-```bash
-mkdir remindervotebot && cd remindervotebot
-curl -O https://raw.githubusercontent.com/MrDDream/ReminderVoteBot/main/docker-compose.yml
+Dans un dossier dédié (par exemple `remindervotebot/`), créez ce fichier et remplacez les trois premières valeurs :
+
+```yaml
+services:
+  bot:
+    image: ghcr.io/mrddream/remindervotebot:latest
+    container_name: ReminderVoteBot
+    restart: unless-stopped
+    init: true
+    # Enregistre les commandes slash sur votre serveur, puis lance le bot
+    command: sh -c "node src/deploy-commands.js && exec node src/index.js"
+    environment:
+      DISCORD_TOKEN: "token_du_bot"
+      CLIENT_ID: "application_id"
+      GUILD_ID: "id_de_votre_serveur_discord"
+      BOT_LANG: "fr"
+      DEFAULT_TZ: "Europe/Paris"
+      # Optionnel : vote en un clic (voir plus bas), décommentez les deux lignes
+      # PUBLIC_BASE_URL: "https://vote.example.com"
+      # MARK_SECRET: "32 caractères minimum, ex. : openssl rand -hex 32"
+    volumes:
+      - bot_data:/app/data
+    # Utile uniquement pour le vote en un clic
+    ports:
+      - "3000:3000"
+
+volumes:
+  bot_data:
 ```
 
-### 3. Créer le fichier `.env` à côté
-
-```env
-DISCORD_TOKEN=token_du_bot
-CLIENT_ID=application_id
-GUILD_ID=id_de_votre_serveur_discord
-BOT_LANG=fr
-DEFAULT_TZ=Europe/Paris
-
-# Optionnel : vote en un clic (voir plus bas). Décommentez les deux lignes.
-# PUBLIC_BASE_URL=https://vote.example.com
-# MARK_SECRET=
-```
-
-### 4. Démarrer
+### 3. Démarrer
 
 ```bash
 docker compose up -d
@@ -85,7 +96,7 @@ Les abonnements et les sites de vote sont conservés dans le volume Docker `bot_
 Par défaut, *Voter maintenant* ouvre directement le site de vote, et le joueur clique sur *J'ai voté* pour relancer son délai. Pour que le vote soit enregistré automatiquement :
 
 1. Rendez le bot joignable depuis Internet sur un domaine en HTTPS, par exemple avec un reverse proxy (Caddy, Nginx, Traefik…) vers le port `3000` du conteneur.
-2. Dans le `.env`, renseignez `PUBLIC_BASE_URL` avec ce domaine et `MARK_SECRET` avec une clé d'au moins 32 caractères (`openssl rand -hex 32`).
+2. Dans `docker-compose.yml`, décommentez `PUBLIC_BASE_URL` avec ce domaine et `MARK_SECRET` avec une clé d'au moins 32 caractères (`openssl rand -hex 32`).
 3. Relancez : `docker compose up -d`.
 
 Le bouton passe alors par un lien personnel, signé et valable 7 jours, qui enregistre le vote puis redirige vers le site. En mode mention dans un salon, ce lien est envoyé au joueur en privé, pour que les autres membres ne puissent pas voter à sa place.

@@ -81,18 +81,16 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(token);
 
 async function main() {
-	if (!clientId || !token) {
-		console.error('CLIENT_ID ou DISCORD_TOKEN manquant(s) dans .env');
+	if (!clientId || !token || !guildId) {
+		console.error('CLIENT_ID, DISCORD_TOKEN ou GUILD_ID manquant(s) dans .env');
 		process.exit(1);
 	}
 	try {
-		if (guildId) {
-			await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-			console.log('Commandes guild deployeees.');
-		} else {
-			await rest.put(Routes.applicationCommands(clientId), { body: commands });
-			console.log('Commandes globales deployeees (propagation jusqu a 1h).');
-		}
+		await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+		// The bot serves a single server: remove global commands left by older versions,
+		// otherwise they would stay usable from any server the bot is in.
+		await rest.put(Routes.applicationCommands(clientId), { body: [] });
+		console.log('Commandes deployees sur le serveur et commandes globales supprimees.');
 	} catch (e) {
 		console.error(e);
 		process.exit(1);

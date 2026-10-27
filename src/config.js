@@ -39,7 +39,11 @@ export function loadConfig() {
 	if (!Array.isArray(cfg.voteUrls)) {
 		cfg.voteUrls = [];
 	} else {
-		cfg.voteUrls = cfg.voteUrls.map((entry, index) => {
+		const withoutUrl = cfg.voteUrls.filter(entry => !(entry?.url || cfg.voteBaseUrl || process.env.DEFAULT_VOTE_URL));
+		if (withoutUrl.length > 0) {
+			console.warn(`[WARN] ${withoutUrl.length} URL(s) de vote sans adresse ignorée(s) dans ${configPath}`);
+		}
+		cfg.voteUrls = cfg.voteUrls.filter(entry => !withoutUrl.includes(entry)).map((entry, index) => {
 			const fallbackId = entry.id || `entry-${index + 1}`;
 			return {
 				id: fallbackId,

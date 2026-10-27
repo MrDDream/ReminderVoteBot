@@ -1,20 +1,33 @@
 import './env.js';
-import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, MessageFlags, time, TimestampStyles } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, MessageFlags, PermissionFlagsBits, time, TimestampStyles } from 'discord.js';
 import cron from 'node-cron';
 import express from 'express';
-import crypto from 'crypto';
 import { loadSubscriptions, saveSubscriptions, addSubscription, removeSubscription, removeAllSubscriptionsForUser } from './storage.js';
 import { loadConfig, saveConfig } from './config.js';
 import { isReminderDue, computeNextReminderAt, parseTimeInput, isValidTimezone } from './schedule.js';
+import { signToken, verifyToken } from './token.js';
+import { MAX_VOTE_URL_LENGTH, isValidVoteUrl, isValidPublicBaseUrl, generateVoteUrlId, buildVoteUrl } from './voteUrl.js';
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-	console.error('DISCORD_TOKEN manquant dans .env');
+function exitWithConfigError(message) {
+	console.error(`[CONFIG] ${message}`);
 	process.exit(1);
 }
 
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
+const token = process.env.DISCORD_TOKEN;
+// The bot serves a single Discord server: admin commands only work there.
+const GUILD_ID = process.env.GUILD_ID;
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.replace(/\/+$/, '') : null;
 const MARK_SECRET = process.env.MARK_SECRET;
+if (!token) exitWithConfigError('DISCORD_TOKEN manquant dans .env');
+if (!GUILD_ID) exitWithConfigError('GUILD_ID manquant : indiquez l’ID du serveur Discord du bot.');
+if (PUBLIC_BASE_URL) {
+	if (!isValidPublicBaseUrl(PUBLIC_BASE_URL)) {
+		exitWithConfigError(`PUBLIC_BASE_URL invalide (${PUBLIC_BASE_URL}) : URL complète attendue, ex. https://vote.example.com`);
+	}
+	if (!MARK_SECRET || MARK_SECRET.length < 32) {
+		exitWithConfigError('MARK_SECRET doit faire au moins 32 caractères quand PUBLIC_BASE_URL est défini (ex. : openssl rand -hex 32).');
+	}
+}
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BOT_LANG = (process.env.BOT_LANG || 'fr').trim().toLowerCase() === 'en' ? 'en' : 'fr';
 
@@ -29,6 +42,9 @@ const client = new Client({
 let subscriptions = loadSubscriptions(); // v4 schema
 let config = loadConfig();
 const DEFAULT_COOLDOWN_MINUTES = 120;
+const MAX_VOTE_ENTRIES = 25; // Discord select menus show at most 25 options
+// Repeated hits of the same /v link within this delay do not record the vote again.
+const VOTE_DEDUP_MS = 60 * 1000;
 const SNOOZE_MINUTES = 30;
 // After this many consecutive failed deliveries (DMs closed, channel deleted...), the subscription is paused.
 const MAX_FAILED_DELIVERIES = 3;
@@ -111,27 +127,6 @@ function syncLegacyVoteBaseUrl() {
 
 function getVoteUrlEntries() {
 	return Array.isArray(config.voteUrls) ? config.voteUrls : [];
-}
-
-function slugifyVoteUrlId(label) {
-	return label
-		.toLowerCase()
-		.trim()
-		.replace(/[^a-z0-9]+/g, '-')
-		.replace(/^-+|-+$/g, '') || `vote-${Date.now()}`;
-}
-
-function generateVoteUrlId(label) {
-	const existing = new Set(getVoteUrlEntries().map(entry => entry.id));
-	const base = slugifyVoteUrlId(label);
-	if (!existing.has(base)) return base;
-	let counter = 2;
-	let candidate = `${base}-${counter}`;
-	while (existing.has(candidate)) {
-		counter += 1;
-		candidate = `${base}-${counter}`;
-	}
-	return candidate;
 }
 
 function getCooldownMsForEntry(entry) {
@@ -686,15 +681,6 @@ function buildChannelSelect(customId, channelId) {
 	return select;
 }
 
-function isValidVoteUrl(urlStr) {
-	try {
-		const url = new URL(urlStr.split('{pseudo}').join('pseudo'));
-		return url.protocol === 'https:' || url.protocol === 'http:';
-	} catch {
-		return false;
-	}
-}
-
 function updateVoteEntry(entryId, fields) {
 	const entries = getVoteUrlEntries();
 	const idx = entries.findIndex(entry => entry.id === entryId);
@@ -760,41 +746,23 @@ function serializeError(err) {
 
 function buildVoteUrlForUser(username, voteUrlId) {
 	const entry = getVoteUrlEntryById(voteUrlId);
-	const baseUrl = entry?.url || config.voteBaseUrl;
-	if (!baseUrl) return null;
-	// "{pseudo}" placeholder anywhere in the URL (path or query); otherwise append ?pseudo=.
-	if (baseUrl.includes('{pseudo}')) {
-		return baseUrl.split('{pseudo}').join(encodeURIComponent(username));
-	}
-	const url = new URL(baseUrl);
-	url.searchParams.set('pseudo', username);
-	return url.toString();
-}
-
-function signToken(payload) {
-	const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
-	const sig = crypto.createHmac('sha256', MARK_SECRET || 'dev-secret').update(data).digest('base64url');
-	return `${data}.${sig}`;
-}
-
-function verifyToken(tokenStr) {
-	const [data, sig] = tokenStr.split('.');
-	if (!data || !sig) return null;
-	const expected = crypto.createHmac('sha256', MARK_SECRET || 'dev-secret').update(data).digest('base64url');
-	if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-	try {
-		const json = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
-		return json;
-	} catch {
-		return null;
-	}
+	return buildVoteUrl(entry?.url || config.voteBaseUrl, username);
 }
 
 function buildVoteLinkUrl(sub, directVoteUrl) {
 	if (!PUBLIC_BASE_URL) return directVoteUrl;
 	// The subscription id is needed so the vote is recorded on the right subscription.
-	const token = signToken({ sid: sub.id, uid: sub.userId, iat: Date.now() });
-	return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/v?t=${encodeURIComponent(token)}`;
+	const voteToken = signToken({ sid: sub.id, uid: sub.userId, iat: Date.now() }, MARK_SECRET);
+	return `${PUBLIC_BASE_URL}/v?t=${encodeURIComponent(voteToken)}`;
+}
+
+function isAdminInteraction(interaction) {
+	return interaction.guildId === GUILD_ID && interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) === true;
+}
+
+function isAdminAction(interaction) {
+	if (interaction.isChatInputCommand()) return ['addvote', 'listvote'].includes(interaction.commandName);
+	return typeof interaction.customId === 'string' && /^(addvote|listvote)-/.test(interaction.customId);
 }
 
 // ---------- Reminder messages ----------
@@ -803,12 +771,21 @@ function reminderTitle(entry) {
 	return tr('🗳️ Rappel de vote : {label}', '🗳️ Vote reminder: {label}', { label: entry ? entry.label : '?' }).slice(0, 256);
 }
 
-function buildReminderButtons(sub, voteLinkUrl) {
-	return new ActionRowBuilder().addComponents(
-		new ButtonBuilder()
+// In a channel, a link button would expose the subscriber's signed /v link to every member:
+// a regular button checks who clicks and answers with the link privately instead.
+function buildReminderButtons(sub, voteLinkUrl, inPublicChannel) {
+	const voteButton = inPublicChannel && PUBLIC_BASE_URL
+		? new ButtonBuilder()
+			.setCustomId(`reminder-link|${sub.id}`)
+			.setLabel(tr('Voter maintenant', 'Vote now'))
+			.setEmoji('🗳️')
+			.setStyle(ButtonStyle.Primary)
+		: new ButtonBuilder()
 			.setLabel(tr('Voter maintenant', 'Vote now'))
 			.setStyle(ButtonStyle.Link)
-			.setURL(voteLinkUrl),
+			.setURL(voteLinkUrl);
+	return new ActionRowBuilder().addComponents(
+		voteButton,
 		new ButtonBuilder()
 			.setCustomId(`reminder-voted|${sub.id}`)
 			.setLabel(tr('J’ai voté', 'I voted'))
@@ -852,14 +829,14 @@ function buildReminderVotedPayload(sub) {
 	return { embeds: [embed], components: [] };
 }
 
-function buildReminderSnoozedPayload(sub, voteLinkUrl) {
+function buildReminderSnoozedPayload(sub, voteLinkUrl, inPublicChannel) {
 	const entry = getVoteUrlEntryById(sub.voteUrlId);
 	const next = getNextReminderAt(sub);
 	const embed = new EmbedBuilder()
 		.setColor(COLOR_REMINDER)
 		.setTitle(reminderTitle(entry))
 		.setDescription(tr('⏰ Rappel reporté : nouveau rappel {when}.', '⏰ Reminder snoozed: next reminder {when}.', { when: next ? relativeTs(next) : '-' }));
-	return { embeds: [embed], components: voteLinkUrl ? [buildReminderButtons(sub, voteLinkUrl)] : [] };
+	return { embeds: [embed], components: voteLinkUrl ? [buildReminderButtons(sub, voteLinkUrl, inPublicChannel)] : [] };
 }
 
 async function getDisplayNameForUser(contextGuildId, userId, fallbackUsername) {
@@ -936,12 +913,9 @@ async function sendVoteReminder(sub) {
 			log('warn', 'Aucune URL de vote disponible pour le rappel', context);
 			return;
 		}
-		const payload = {
-			embeds: [buildReminderEmbed(sub, entry, now)],
-			components: [buildReminderButtons(sub, voteLinkUrl)]
-		};
+		const embeds = [buildReminderEmbed(sub, entry, now)];
 		if (sub.mode === 'channel' && sub.channelId) {
-			message = await deliverReminderViaChannel(sub, payload, context);
+			message = await deliverReminderViaChannel(sub, { embeds, components: [buildReminderButtons(sub, voteLinkUrl, true)] }, context);
 			if (!message) {
 				log('warn', 'Echec du rappel via channel, tentative en MP', context);
 			}
@@ -949,7 +923,7 @@ async function sendVoteReminder(sub) {
 			log('warn', 'Mode channel demande mais aucun channelId stocke', context);
 		}
 		if (!message) {
-			message = await deliverReminderViaDm(user, payload, context, sub.mode === 'channel');
+			message = await deliverReminderViaDm(user, { embeds, components: [buildReminderButtons(sub, voteLinkUrl, false)] }, context, sub.mode === 'channel');
 		}
 	} catch (err) {
 		log('error', 'Erreur lors de la preparation du rappel', { ...context, error: serializeError(err) });
@@ -1037,11 +1011,15 @@ async function handleModalSubmit(interaction) {
 			return;
 		}
 		if (!urlRaw || !isValidVoteUrl(urlRaw)) {
-			await interaction.reply(asReply({ content: tr('URL invalide. Elle doit commencer par https:// (le paramètre `{pseudo}` est autorisé).', 'Invalid URL. It must start with https:// (the `{pseudo}` placeholder is allowed).') }));
+			await interaction.reply(asReply({ content: tr('URL invalide : elle doit commencer par https:// et faire au plus {max} caractères (le paramètre `{pseudo}` est autorisé).', 'Invalid URL: it must start with https:// and be at most {max} characters long (the `{pseudo}` placeholder is allowed).', { max: MAX_VOTE_URL_LENGTH }) }));
 			return;
 		}
 		const allEntries = getVoteUrlEntries();
-		const id = generateVoteUrlId(labelRaw);
+		if (allEntries.length >= MAX_VOTE_ENTRIES) {
+			await interaction.reply(asReply({ content: tr('Limite de {max} URLs de vote atteinte. Supprimez-en une avec /listvote.', 'Limit of {max} vote URLs reached. Delete one with /listvote.', { max: MAX_VOTE_ENTRIES }) }));
+			return;
+		}
+		const id = generateVoteUrlId(labelRaw, new Set(allEntries.map(entry => entry.id)));
 		const entry = { id, label: labelRaw, url: urlRaw, cooldownMinutes: minutes, channelId };
 		config.voteUrls = [...allEntries, entry];
 		if (!config.defaultVoteUrlId) {
@@ -1097,7 +1075,7 @@ async function handleModalSubmit(interaction) {
 			return;
 		}
 		if (!urlStr || !isValidVoteUrl(urlStr)) {
-			await interaction.reply(asReply({ content: tr('URL invalide. Elle doit commencer par https:// (le paramètre `{pseudo}` est autorisé).', 'Invalid URL. It must start with https:// (the `{pseudo}` placeholder is allowed).') }));
+			await interaction.reply(asReply({ content: tr('URL invalide : elle doit commencer par https:// et faire au plus {max} caractères (le paramètre `{pseudo}` est autorisé).', 'Invalid URL: it must start with https:// and be at most {max} characters long (the `{pseudo}` placeholder is allowed).', { max: MAX_VOTE_URL_LENGTH }) }));
 			return;
 		}
 		updateVoteEntry(current.id, { label, url: urlStr });
@@ -1256,12 +1234,25 @@ async function handleReminderButton(interaction) {
 		await interaction.reply(asReply({ content: tr('Ce bouton est réservé au destinataire du rappel.', 'This button is reserved for the reminder recipient.') }));
 		return;
 	}
+	if (action === 'reminder-link') {
+		await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+		const { voteLinkUrl } = await buildVoteLinkForSub(sub);
+		await interaction.editReply(voteLinkUrl
+			? {
+				content: tr('Voici votre lien de vote personnel :', 'Here is your personal vote link:'),
+				components: [new ActionRowBuilder().addComponents(
+					new ButtonBuilder().setLabel(tr('Voter maintenant', 'Vote now')).setStyle(ButtonStyle.Link).setURL(voteLinkUrl)
+				)]
+			}
+			: { content: tr('Aucune URL de vote configurée.', 'No vote URL configured.') });
+		return;
+	}
 	if (action === 'reminder-snooze') {
 		sub.snoozeUntil = Date.now() + SNOOZE_MINUTES * 60 * 1000;
 		saveSubscriptions(subscriptions);
 		log('info', 'Rappel reporte', { userId: sub.userId, subscriptionId: sub.id });
 		const { voteLinkUrl } = await buildVoteLinkForSub(sub);
-		await interaction.update(buildReminderSnoozedPayload(sub, voteLinkUrl));
+		await interaction.update(buildReminderSnoozedPayload(sub, voteLinkUrl, interaction.inGuild()));
 		return;
 	}
 	// 'reminder-voted', and 'reminder-reset' from reminders sent by older versions.
@@ -1360,6 +1351,7 @@ async function handleButton(interaction) {
 						.setLabel(tr('URL (peut contenir {pseudo})', 'URL (may contain {pseudo})'))
 						.setStyle(TextInputStyle.Short)
 						.setRequired(true)
+						.setMaxLength(MAX_VOTE_URL_LENGTH)
 						.setValue(entry.url)
 				)
 			);
@@ -1547,6 +1539,7 @@ async function handleCommand(interaction) {
 						.setLabel(tr('URL de vote (peut contenir {pseudo})', 'Vote URL (may contain {pseudo})'))
 						.setStyle(TextInputStyle.Short)
 						.setRequired(true)
+						.setMaxLength(MAX_VOTE_URL_LENGTH)
 						.setPlaceholder('https://example.com/vote?user={pseudo}')
 				)
 			);
@@ -1619,6 +1612,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		return;
 	}
 	try {
+		// Discord's default_member_permissions can be changed by server admins: check on our side too.
+		if (isAdminAction(interaction) && !isAdminInteraction(interaction)) {
+			await interaction.reply(asReply({ content: tr('Réservé aux membres ayant la permission « Gérer le serveur » sur le serveur du bot.', 'Reserved to members with the “Manage Server” permission on the bot’s server.') }));
+			return;
+		}
 		if (interaction.isModalSubmit()) {
 			await handleModalSubmit(interaction);
 		} else if (interaction.isStringSelectMenu() || interaction.isChannelSelectMenu()) {
@@ -1645,21 +1643,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // Minimal web server for vote redirect
 const app = express();
+app.disable('x-powered-by');
 app.get('/', (_req, res) => res.status(200).send('OK'));
 app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
 app.get('/v', async (req, res) => {
 	try {
-		const t = req.query.t;
-		if (!t) return res.status(400).send('Missing token');
-		const payload = verifyToken(String(t));
-		if (!payload?.uid) return res.status(400).send('Invalid token');
-		// Tokens issued before the subscription id was included only carry the user id.
-		const sub = payload.sid
-			? subscriptions.find(s => s.id === payload.sid && s.userId === payload.uid)
-			: subscriptions.find(s => s.userId === payload.uid);
+		if (!PUBLIC_BASE_URL) return res.status(404).send('Not found');
+		const payload = verifyToken(req.query.t, MARK_SECRET);
+		if (!payload) return res.status(400).send('Invalid or expired link');
+		const sub = subscriptions.find(s => s.id === payload.sid && s.userId === payload.uid);
 		if (!sub) return res.status(404).send('Not subscribed');
-		markVoted(sub);
-		refreshLastReminderMessage(sub);
 		// Build redirect URL with current display name
 		const user = await client.users.fetch(sub.userId);
 		const displayName = await getDisplayNameForUser(sub.guildId, sub.userId, user.username);
@@ -1667,7 +1660,12 @@ app.get('/v', async (req, res) => {
 		if (!target) {
 			return res.status(503).send('Vote URL not configured');
 		}
-		log('info', 'Redirection de vote', { userId: sub.userId, subscriptionId: sub.id, guildId: sub.guildId || null });
+		// A replayed link (double click, link preview, script) does not rewrite data nor call Discord again.
+		if (!sub.lastVotedAt || Date.now() - sub.lastVotedAt > VOTE_DEDUP_MS) {
+			markVoted(sub);
+			refreshLastReminderMessage(sub);
+			log('info', 'Vote enregistre via redirection', { userId: sub.userId, subscriptionId: sub.id });
+		}
 		res.redirect(target);
 	} catch (e) {
 		log('error', 'Erreur lors de la redirection de vote', { error: serializeError(e) });

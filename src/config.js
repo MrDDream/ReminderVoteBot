@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import './env.js';
 import { readJson, writeJsonAtomic } from './jsonFile.js';
+import { isValidTimezone } from './schedule.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +34,10 @@ export function loadConfig() {
 	// that would overwrite the configured vote URLs on the next save.
 	const cfg = readJson(configPath);
 	if (!cfg.timezone) cfg.timezone = process.env.DEFAULT_TZ || 'Europe/Paris';
+	if (!isValidTimezone(cfg.timezone)) {
+		console.warn(`[WARN] Fuseau horaire invalide (${cfg.timezone}), utilisation de Europe/Paris`);
+		cfg.timezone = 'Europe/Paris';
+	}
 	if (!cfg.forcedDeliveryMode) {
 		cfg.forcedDeliveryMode = process.env.FORCE_DELIVERY_MODE === 'channel' ? 'channel' : 'dm';
 	}

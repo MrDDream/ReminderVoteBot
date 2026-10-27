@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { readJson, writeJsonAtomic } from './jsonFile.js';
+import { isValidTimezone } from './schedule.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,7 +33,7 @@ function normalizeSubscription(raw, fallbackPrefix, index) {
 		window: normalizeWindow(raw.window),
 		mode: raw.mode === 'channel' ? 'channel' : 'dm',
 		channelId: raw.channelId || null,
-		timezone: raw.timezone || raw.tz || null,
+		timezone: isValidTimezone(raw.timezone || raw.tz) ? (raw.timezone || raw.tz) : null,
 		guildId: raw.guildId || null,
 		lastKnownDisplayName: raw.lastKnownDisplayName || null,
 		lastVotedAt: typeof raw.lastVotedAt === 'number' ? raw.lastVotedAt : null,
@@ -80,7 +81,8 @@ export function loadSubscriptions() {
 		}
 		migrated.push(normalizeSubscription(entry, 'sub', idx++));
 	}
-	if (migrated.length !== data.length) {
+	// Persist any normalization (new ids, migrated fields) so ids stay stable across restarts.
+	if (JSON.stringify(migrated) !== JSON.stringify(data)) {
 		saveSubscriptions(migrated);
 	}
 	return migrated;

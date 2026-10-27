@@ -13,6 +13,7 @@ function getFormatter(timezone) {
 }
 
 export function isValidTimezone(timezone) {
+	if (typeof timezone !== 'string' || !timezone) return false;
 	try {
 		getFormatter(timezone);
 		return true;

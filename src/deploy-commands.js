@@ -1,10 +1,10 @@
 import './env.js';
 import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
+import { BOT_LANG, COOLDOWN_CHOICES } from './constants.js';
 
 const clientId = process.env.CLIENT_ID;
 const guildId = process.env.GUILD_ID;
 const token = process.env.DISCORD_TOKEN;
-const BOT_LANG = (process.env.BOT_LANG || 'fr').trim().toLowerCase() === 'en' ? 'en' : 'fr';
 
 const DESCRIPTIONS = {
 	subscribe: {
@@ -36,15 +36,6 @@ const DESCRIPTIONS = {
 		en: 'Channel where subscribers are pinged in ping mode (optional).'
 	}
 };
-
-const COOLDOWN_CHOICES = [
-	{ minutes: 60, fr: '1 heure', en: '1 hour' },
-	{ minutes: 120, fr: '2 heures', en: '2 hours' },
-	{ minutes: 180, fr: '3 heures', en: '3 hours' },
-	{ minutes: 240, fr: '4 heures', en: '4 hours' },
-	{ minutes: 720, fr: '12 heures', en: '12 hours' },
-	{ minutes: 1440, fr: '24 heures', en: '24 hours' }
-];
 
 const commands = [
 	new SlashCommandBuilder()

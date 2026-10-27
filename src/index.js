@@ -1,5 +1,5 @@
 import './env.js';
-import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, MessageFlags, PermissionFlagsBits, time, TimestampStyles } from 'discord.js';
+import { Client, GatewayIntentBits, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, MessageFlags, PermissionFlagsBits, time, TimestampStyles } from 'discord.js';
 import cron from 'node-cron';
 import express from 'express';
 import { loadSubscriptions, saveSubscriptions, addSubscription, removeSubscription, removeAllSubscriptionsForUser } from './storage.js';
@@ -7,6 +7,7 @@ import { loadConfig, saveConfig } from './config.js';
 import { isReminderDue, computeNextReminderAt, parseTimeInput, isValidTimezone } from './schedule.js';
 import { signToken, verifyToken } from './token.js';
 import { MAX_VOTE_URL_LENGTH, isValidVoteUrl, isValidPublicBaseUrl, generateVoteUrlId, buildVoteUrl } from './voteUrl.js';
+import { BOT_LANG, COOLDOWN_CHOICES, DEFAULT_COOLDOWN_MINUTES } from './constants.js';
 
 function exitWithConfigError(message) {
 	console.error(`[CONFIG] ${message}`);
@@ -29,18 +30,20 @@ if (PUBLIC_BASE_URL) {
 	}
 }
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const BOT_LANG = (process.env.BOT_LANG || 'fr').trim().toLowerCase() === 'en' ? 'en' : 'fr';
 
-const client = new Client({
-	intents: [
-		GatewayIntentBits.Guilds,
-		GatewayIntentBits.DirectMessages
-	],
-	partials: [Partials.Channel]
-});
+// Interactions and REST calls only: the bot never reads messages.
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 let subscriptions = loadSubscriptions(); // v4 schema
-let config = loadConfig();
+const config = loadConfig();
+
+// Subscriptions from the single-URL era have no vote entry: attach them to the default one.
+function adoptOrphanSubscriptions() {
+	if (!config.defaultVoteUrlId) return;
+	const orphans = subscriptions.filter(sub => !sub.voteUrlId);
+	for (const sub of orphans) sub.voteUrlId = config.defaultVoteUrlId;
+	if (orphans.length > 0) persistSubscriptions();
+}
 
 // Subscription changes are written at most once per second: a burst of reminders
 // or clicks rewrites the file once instead of once per change.
@@ -62,7 +65,6 @@ function flushSubscriptions() {
 		persistSubscriptions();
 	}
 }
-const DEFAULT_COOLDOWN_MINUTES = 120;
 const MAX_VOTE_ENTRIES = 25; // Discord select menus show at most 25 options
 // Repeated hits of the same /v link within this delay do not record the vote again.
 const VOTE_DEDUP_MS = 60 * 1000;
@@ -72,14 +74,6 @@ const MAX_FAILED_DELIVERIES = 3;
 const COLOR_REMINDER = 0x5865F2;
 const COLOR_SUCCESS = 0x57F287;
 const COLOR_WARNING = 0xFEE75C;
-const COOLDOWN_CHOICES = [
-	{ minutes: 60, fr: '1 heure', en: '1 hour' },
-	{ minutes: 120, fr: '2 heures', en: '2 hours' },
-	{ minutes: 180, fr: '3 heures', en: '3 hours' },
-	{ minutes: 240, fr: '4 heures', en: '4 hours' },
-	{ minutes: 720, fr: '12 heures', en: '12 hours' },
-	{ minutes: 1440, fr: '24 heures', en: '24 hours' }
-];
 const WINDOW_PRESETS = [
 	{ id: 'allday', window: null, fr: 'Toute la journée', en: 'All day' },
 	{ id: 'day', window: { start: '08:00', end: '20:00' }, fr: 'Journée', en: 'Daytime' },
@@ -118,17 +112,6 @@ function tr(frText, enText, params = {}) {
 
 function getVoteUrlEntryById(id) {
 	return getVoteUrlEntries().find(entry => entry.id === id) || null;
-}
-
-function syncLegacyVoteBaseUrl() {
-	const entry = getVoteUrlEntryById(config.defaultVoteUrlId);
-	if (entry) {
-		config.voteBaseUrl = entry.url;
-		return;
-	}
-	if (!config.defaultVoteUrlId && getVoteUrlEntries().length === 0) {
-		config.voteBaseUrl = null;
-	}
 }
 
 function getVoteUrlEntries() {
@@ -172,11 +155,18 @@ function sameWindow(a, b) {
 	return a.start === b.start && a.end === b.end;
 }
 
+const offsetFormatters = new Map();
+const clockFormatters = new Map();
+
+function cachedFormatter(cache, timezone, options) {
+	if (!cache.has(timezone)) cache.set(timezone, new Intl.DateTimeFormat(options.locale, { ...options.format, timeZone: timezone }));
+	return cache.get(timezone);
+}
+
 function getUtcOffsetLabel(timezone) {
 	try {
-		const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, timeZoneName: 'shortOffset' }).formatToParts(new Date());
-		const offset = parts.find(p => p.type === 'timeZoneName')?.value || 'GMT';
-		return offset.replace('GMT', 'UTC');
+		const parts = cachedFormatter(offsetFormatters, timezone, { locale: 'en-US', format: { timeZoneName: 'shortOffset' } }).formatToParts(new Date());
+		return (parts.find(p => p.type === 'timeZoneName')?.value || 'GMT').replace('GMT', 'UTC');
 	} catch {
 		return '';
 	}
@@ -184,7 +174,7 @@ function getUtcOffsetLabel(timezone) {
 
 function getLocalTimeLabel(timezone) {
 	try {
-		return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' }).format(new Date());
+		return cachedFormatter(clockFormatters, timezone, { locale: 'en-GB', format: { hourCycle: 'h23', hour: '2-digit', minute: '2-digit' } }).format(new Date());
 	} catch {
 		return '';
 	}
@@ -269,9 +259,7 @@ function asReply(payload) {
 function buildWindowSelect(customId, windowObj) {
 	const select = new StringSelectMenuBuilder()
 		.setCustomId(customId)
-		.setPlaceholder(tr('Plage horaire des rappels', 'Reminder time window'))
-		.setMinValues(1)
-		.setMaxValues(1);
+		.setPlaceholder(tr('Plage horaire des rappels', 'Reminder time window'));
 	const matchingPreset = WINDOW_PRESETS.find(p => sameWindow(p.window, windowObj));
 	for (const preset of WINDOW_PRESETS) {
 		select.addOptions({
@@ -302,8 +290,6 @@ function buildModeSelect(customId, mode, entry) {
 	const select = new StringSelectMenuBuilder()
 		.setCustomId(customId)
 		.setPlaceholder(tr('Mode de rappel', 'Reminder mode'))
-		.setMinValues(1)
-		.setMaxValues(1)
 		.addOptions({
 			label: tr('Message privé', 'Direct message'),
 			value: 'dm',
@@ -326,9 +312,7 @@ function buildModeSelect(customId, mode, entry) {
 function buildTimezoneSelect(customId, timezone) {
 	const select = new StringSelectMenuBuilder()
 		.setCustomId(customId)
-		.setPlaceholder(tr('Fuseau horaire', 'Timezone'))
-		.setMinValues(1)
-		.setMaxValues(1);
+		.setPlaceholder(tr('Fuseau horaire', 'Timezone'));
 	const zones = TIMEZONE_CHOICES.map(c => c.tz);
 	if (timezone && !zones.includes(timezone)) zones.unshift(timezone);
 	for (const tz of zones.slice(0, 25)) {
@@ -708,7 +692,6 @@ function updateVoteEntry(entryId, fields) {
 	if (idx === -1) return null;
 	const updatedEntry = { ...entries[idx], ...fields };
 	config.voteUrls = entries.map((entry, i) => (i === idx ? updatedEntry : entry));
-	syncLegacyVoteBaseUrl();
 	saveConfig(config);
 	if ('channelId' in fields) {
 		let updatedSubs = 0;
@@ -729,7 +712,6 @@ function deleteVoteEntry(entryId) {
 	if (!getVoteUrlEntryById(config.defaultVoteUrlId)) {
 		config.defaultVoteUrlId = config.voteUrls[0]?.id || null;
 	}
-	syncLegacyVoteBaseUrl();
 	saveConfig(config);
 	const before = subscriptions.length;
 	subscriptions = subscriptions.filter(sub => sub.voteUrlId !== entryId);
@@ -740,27 +722,12 @@ function deleteVoteEntry(entryId) {
 
 // ---------- Logging ----------
 
+const CONSOLE_METHODS = { error: console.error, warn: console.warn, info: console.log };
+
 function log(level, message, meta) {
-	const timestamp = new Date().toISOString();
-	const formatted = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
-	if (meta && Object.keys(meta).length > 0) {
-		const serializedMeta = JSON.stringify(meta);
-		if (level === 'error') {
-			console.error(`${formatted} ${serializedMeta}`);
-		} else if (level === 'warn') {
-			console.warn(`${formatted} ${serializedMeta}`);
-		} else {
-			console.log(`${formatted} ${serializedMeta}`);
-		}
-		return;
-	}
-	if (level === 'error') {
-		console.error(formatted);
-	} else if (level === 'warn') {
-		console.warn(formatted);
-	} else {
-		console.log(formatted);
-	}
+	const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${message}`;
+	const write = CONSOLE_METHODS[level] || console.log;
+	write(meta && Object.keys(meta).length > 0 ? `${line} ${JSON.stringify(meta)}` : line);
 }
 
 function serializeError(err) {
@@ -780,7 +747,7 @@ function serializeError(err) {
 
 function buildVoteUrlForUser(username, voteUrlId) {
 	const entry = getVoteUrlEntryById(voteUrlId);
-	return buildVoteUrl(entry?.url || config.voteBaseUrl, username);
+	return buildVoteUrl(entry?.url, username);
 }
 
 function buildVoteLinkUrl(sub, directVoteUrl) {
@@ -918,7 +885,7 @@ async function deliverReminderViaChannel(sub, payload, context) {
 		log('info', 'Rappel envoye sur le channel', context);
 		return message;
 	} catch (err) {
-		log('error', 'Echec de lenvoi du rappel sur le channel', { ...context, error: serializeError(err) });
+		log('error', 'Rappel non envoye sur le channel', { ...context, error: serializeError(err) });
 		return null;
 	}
 }
@@ -929,7 +896,7 @@ async function deliverReminderViaDm(user, payload, context, isFallback) {
 		log('info', isFallback ? 'Rappel envoye en MP (fallback)' : 'Rappel envoye en MP', context);
 		return message;
 	} catch (err) {
-		log('error', 'Echec de lenvoi du rappel en MP', { ...context, error: serializeError(err) });
+		log('error', 'Rappel non envoye en MP', { ...context, error: serializeError(err) });
 		return null;
 	}
 }
@@ -1048,6 +1015,8 @@ async function runReminderTick() {
 	}
 }
 
+adoptOrphanSubscriptions();
+
 client.once(Events.ClientReady, () => {
 	log('info', 'Client pret', { tag: client.user.tag, subscriptions: subscriptions.length });
 	reminderCronTask = cron.schedule('* * * * *', runReminderTick);
@@ -1109,15 +1078,8 @@ async function handleAddVoteModal(interaction, cooldownRaw, channelRaw) {
 	config.voteUrls = [...allEntries, entry];
 	if (!config.defaultVoteUrlId) {
 		config.defaultVoteUrlId = entry.id;
-		// Subscriptions migrated from the single-URL era have no vote entry yet.
-		const orphans = subscriptions.filter(sub => !sub.voteUrlId);
-		for (const sub of orphans) {
-			sub.voteUrlId = entry.id;
-			if (sub.mode === 'channel') sub.channelId = entry.channelId;
-		}
-		if (orphans.length > 0) persistSubscriptions();
 	}
-	syncLegacyVoteBaseUrl();
+	adoptOrphanSubscriptions();
 	saveConfig(config);
 	log('info', 'URL ajoutee via /addvote', { userId: interaction.user.id, id: entry.id, url: entry.url, cooldownMinutes: entry.cooldownMinutes, channelId: entry.channelId });
 	await interaction.reply(asReply({

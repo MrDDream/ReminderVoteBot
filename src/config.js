@@ -1,75 +1,55 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import './env.js';
 import { readJson, writeJsonAtomic } from './jsonFile.js';
 import { isValidTimezone } from './schedule.js';
+import { dataDir, ensureDataDir } from './paths.js';
+import { DEFAULT_COOLDOWN_MINUTES } from './constants.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dataDir = path.join(__dirname, '..', 'data');
 const configPath = path.join(dataDir, 'config.json');
+const FALLBACK_TIMEZONE = 'Europe/Paris';
 
-function ensureDataDir() {
-	if (!fs.existsSync(dataDir)) {
-		fs.mkdirSync(dataDir, { recursive: true });
+function normalizeConfig(raw) {
+	const cfg = { ...raw };
+	cfg.timezone = cfg.timezone || process.env.DEFAULT_TZ || FALLBACK_TIMEZONE;
+	if (!isValidTimezone(cfg.timezone)) {
+		console.warn(`[WARN] Fuseau horaire invalide (${cfg.timezone}), utilisation de ${FALLBACK_TIMEZONE}`);
+		cfg.timezone = FALLBACK_TIMEZONE;
 	}
+	const entries = Array.isArray(cfg.voteUrls) ? cfg.voteUrls : [];
+	// Configs from the single-URL era: the URL becomes a regular vote entry.
+	const legacyUrl = cfg.voteBaseUrl || process.env.DEFAULT_VOTE_URL;
+	if (entries.length === 0 && legacyUrl) {
+		entries.push({ id: 'vote', label: 'Vote', url: legacyUrl });
+	}
+	const withoutUrl = entries.filter(entry => !entry?.url);
+	if (withoutUrl.length > 0) {
+		console.warn(`[WARN] ${withoutUrl.length} URL(s) de vote sans adresse ignorée(s) dans ${configPath}`);
+	}
+	cfg.voteUrls = entries.filter(entry => entry?.url).map((entry, index) => ({
+		id: entry.id || `entry-${index + 1}`,
+		label: entry.label || entry.displayName || `Option ${index + 1}`,
+		url: entry.url,
+		cooldownMinutes: typeof entry.cooldownMinutes === 'number' && entry.cooldownMinutes > 0 ? entry.cooldownMinutes : DEFAULT_COOLDOWN_MINUTES,
+		channelId: entry.channelId || null
+	}));
+	if (!cfg.voteUrls.some(entry => entry.id === cfg.defaultVoteUrlId)) {
+		cfg.defaultVoteUrlId = cfg.voteUrls[0]?.id || null;
+	}
+	// Fields of older versions that nothing reads anymore.
+	delete cfg.voteBaseUrl;
+	delete cfg.intervalCron;
+	delete cfg.forcedDeliveryMode;
+	return cfg;
 }
 
 export function loadConfig() {
 	ensureDataDir();
-	if (!fs.existsSync(configPath)) {
-		const initial = {
-			voteBaseUrl: process.env.DEFAULT_VOTE_URL || null,
-			intervalCron: '0 */2 * * *', // every 2 hours at minute 0
-			timezone: process.env.DEFAULT_TZ || 'Europe/Paris',
-			forcedDeliveryMode: process.env.FORCE_DELIVERY_MODE === 'channel' ? 'channel' : 'dm',
-			voteUrls: [],
-			defaultVoteUrlId: null
-		};
-		saveConfig(initial);
-		return initial;
-	}
 	// readJson throws on unrecoverable corruption instead of returning defaults
 	// that would overwrite the configured vote URLs on the next save.
-	const cfg = readJson(configPath);
-	if (!cfg.timezone) cfg.timezone = process.env.DEFAULT_TZ || 'Europe/Paris';
-	if (!isValidTimezone(cfg.timezone)) {
-		console.warn(`[WARN] Fuseau horaire invalide (${cfg.timezone}), utilisation de Europe/Paris`);
-		cfg.timezone = 'Europe/Paris';
-	}
-	if (!cfg.forcedDeliveryMode) {
-		cfg.forcedDeliveryMode = process.env.FORCE_DELIVERY_MODE === 'channel' ? 'channel' : 'dm';
-	}
-	if (!Array.isArray(cfg.voteUrls)) {
-		cfg.voteUrls = [];
-	} else {
-		const withoutUrl = cfg.voteUrls.filter(entry => !(entry?.url || cfg.voteBaseUrl || process.env.DEFAULT_VOTE_URL));
-		if (withoutUrl.length > 0) {
-			console.warn(`[WARN] ${withoutUrl.length} URL(s) de vote sans adresse ignorée(s) dans ${configPath}`);
-		}
-		cfg.voteUrls = cfg.voteUrls.filter(entry => !withoutUrl.includes(entry)).map((entry, index) => {
-			const fallbackId = entry.id || `entry-${index + 1}`;
-			return {
-				id: fallbackId,
-				label: entry.label || entry.displayName || `Option ${index + 1}`,
-				url: entry.url || cfg.voteBaseUrl || process.env.DEFAULT_VOTE_URL || null,
-				cooldownMinutes: typeof entry.cooldownMinutes === 'number' && entry.cooldownMinutes > 0 ? entry.cooldownMinutes : 120,
-				channelId: entry.channelId || null
-			};
-		});
-	}
-	if (cfg.voteUrls.length === 0) {
-		cfg.defaultVoteUrlId = null;
-		if (!cfg.voteBaseUrl) {
-			cfg.voteBaseUrl = process.env.DEFAULT_VOTE_URL || null;
-		}
-	} else {
-		if (!cfg.defaultVoteUrlId || !cfg.voteUrls.find(v => v.id === cfg.defaultVoteUrlId)) {
-			cfg.defaultVoteUrlId = cfg.voteUrls[0].id;
-		}
-		cfg.voteBaseUrl = cfg.voteUrls.find(v => v.id === cfg.defaultVoteUrlId)?.url || cfg.voteUrls[0].url;
-	}
+	const raw = fs.existsSync(configPath) ? readJson(configPath) : {};
+	const cfg = normalizeConfig(raw);
+	if (JSON.stringify(cfg) !== JSON.stringify(raw)) saveConfig(cfg);
 	return cfg;
 }
 
@@ -77,8 +57,3 @@ export function saveConfig(cfg) {
 	ensureDataDir();
 	writeJsonAtomic(configPath, cfg);
 }
-
-export function getDataPaths() {
-	return { dataDir, configPath };
-}
-

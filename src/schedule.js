@@ -23,14 +23,14 @@ export function isValidTimezone(timezone) {
 }
 
 // Minutes since local midnight in the given timezone.
-export function getTzMinutes(date, timezone) {
+function getTzMinutes(date, timezone) {
 	const parts = getFormatter(timezone).formatToParts(date);
 	const hh = parseInt(parts.find(p => p.type === 'hour').value, 10);
 	const mm = parseInt(parts.find(p => p.type === 'minute').value, 10);
 	return hh * 60 + mm;
 }
 
-export function timeStringToMinutes(hhmm) {
+function timeStringToMinutes(hhmm) {
 	const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hhmm || '');
 	if (!m) return null;
 	return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
@@ -63,7 +63,7 @@ export function withinWindow(date, windowObj, timezone) {
 // 0 means "as soon as possible" (never reminded nor voted).
 // A reminder is repeated every cooldown even when it was ignored, until the user votes.
 // A snooze requested after the last reminder/vote replaces the cooldown.
-export function computeDueAt(sub, cooldownMs) {
+function computeDueAt(sub, cooldownMs) {
 	const base = Math.max(sub.lastVotedAt || 0, sub.lastReminderAt || 0);
 	if (sub.snoozeUntil && sub.snoozeUntil > base) return sub.snoozeUntil;
 	return base ? base + cooldownMs : 0;

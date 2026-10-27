@@ -1,279 +1,176 @@
 # ReminderVoteBot
-Cette documentation est disponible en [Français](README.fr.md) et en [Anglais](README.md)
 
-## Vue d'ensemble
-Un bot Discord qui envoie des rappels de vote automatisés aux utilisateurs abonnés via messages privés ou mentions dans un salon. Le bot prend en charge plusieurs serveurs de vote, des fenêtres horaires personnalisables, une planification tenant compte des fuseaux horaires et des périodes de cooldown configurables.
+[English](README.md) · **Français** · [Site du projet](https://mrddream.github.io/ReminderVoteBot/)
+
+[![CI](https://github.com/MrDDream/ReminderVoteBot/actions/workflows/docker.yml/badge.svg)](https://github.com/MrDDream/ReminderVoteBot/actions/workflows/docker.yml)
+[![Image Docker](https://img.shields.io/badge/ghcr.io-remindervotebot-2496ED?logo=docker&logoColor=white)](https://github.com/users/MrDDream/packages/container/package/remindervotebot)
+[![Licence MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+
+Bot Discord qui rappelle à vos joueurs de voter pour votre serveur, au bon moment : en message privé ou par mention dans un salon, pour chaque site de vote, selon leurs horaires et leur fuseau.
+
+![Aperçu des rappels, de /subscribe, /status et /listvote dans Discord](docs/assets/screens-fr.png)
 
 ## Fonctionnalités
 
-- 🔔 **Rappels de vote automatisés** : Envoie des rappels par MP ou mentions dans un salon selon les préférences de l'utilisateur
-- ⏰ **Support des fenêtres horaires** : Configurez des heures spécifiques pour l'envoi des rappels
-- 🌍 **Prise en charge des fuseaux horaires** : Supporte différents fuseaux horaires pour une planification précise
-- 🎯 **Plusieurs serveurs de vote** : Gérez plusieurs URLs de vote avec différentes périodes de cooldown
-- 🔄 **Gestion du cooldown** : Périodes de cooldown configurables (1h, 2h, 3h, 4h, 12h, 24h)
-- 🌐 **Redirection web** : Interface web optionnelle pour le suivi sécurisé des votes
-- 🌍 **Multilingue** : Supporte l'anglais et le français
-- 📊 **Gestion du statut** : Visualisez et gérez facilement vos abonnements
-
-## Prérequis
-
-- Node.js 26 ou supérieur
-- Un token de bot Discord ([Discord Developer Portal](https://discord.com/developers/applications))
-- (Optionnel) Docker et Docker Compose pour un déploiement conteneurisé
+- 🔔 **Rappels par MP ou mention** dans le salon choisi par l'admin, avec repli automatique en MP
+- 🕗 **Plages horaires** : préréglages (journée, matin, soirée…) ou heures précises, plages de nuit comprises
+- 🌍 **Fuseau horaire par joueur**
+- 🎯 **Plusieurs sites de vote** (25 maximum), chacun avec son délai (1 h à 24 h) et son salon ; le pseudo est inséré dans l'URL
+- ✅ **Boutons dans le rappel** : *Voter maintenant*, *J'ai voté* (relance le délai), *Dans 30 min*
+- ⚡ **Vote en un clic** (optionnel) : avec un domaine public, *Voter maintenant* enregistre le vote tout seul
+- 📋 **`/status`** : dernier vote et prochain rappel, modification et suppression en un clic
+- 🛡️ **Fiable** : sauvegarde avec copie de secours, conteneur non-root, commandes admin réservées à « Gérer le serveur »
+- 🇫🇷 🇬🇧 Français ou anglais
 
 ## Installation
 
-### Utilisation de Docker (Recommandé)
+Le bot est distribué en image Docker prête à l'emploi (`linux/amd64` et `linux/arm64`) : il suffit de Docker avec Docker Compose.
 
-1. Clonez le dépôt :
+### 1. Créer le bot Discord
+
+1. Sur le [Discord Developer Portal](https://discord.com/developers/applications), créez une application.
+2. Notez son **Application ID** (onglet *General Information*), puis dans l'onglet *Bot*, générez et notez le **token**.
+3. Invitez le bot sur votre serveur avec ce lien, en remplaçant `APPLICATION_ID` :
+   ```
+   https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot%20applications.commands&permissions=19456
+   ```
+   (permissions : voir les salons, envoyer des messages, intégrer des liens)
+4. Récupérez l'**ID de votre serveur** : activez le *Mode développeur* dans les paramètres Discord, puis clic droit sur le serveur → *Copier l'identifiant du serveur*.
+
+### 2. Récupérer le fichier Docker Compose
+
 ```bash
-git clone https://github.com/mrddream/ReminderVoteBot.git
-cd ReminderVoteBot
+mkdir remindervotebot && cd remindervotebot
+curl -O https://raw.githubusercontent.com/MrDDream/ReminderVoteBot/main/docker-compose.yml
 ```
 
-2. Créez un fichier `.env` à la racine du projet :
+### 3. Créer le fichier `.env` à côté
+
 ```env
-DISCORD_TOKEN=votre_token_de_bot_discord
-CLIENT_ID=votre_client_id
-GUILD_ID=votre_guild_id  # Obligatoire : le serveur Discord du bot
-DEFAULT_TZ=Europe/Paris  # Fuseau horaire par défaut
-BOT_LANG=fr  # ou 'en' pour l'anglais
-PUBLIC_BASE_URL=https://votre-domaine.com  # Optionnel, pour la redirection de vote
-MARK_SECRET=au_moins_32_caracteres_aleatoires  # Obligatoire avec PUBLIC_BASE_URL (openssl rand -hex 32)
-PORT=3000  # Optionnel, par défaut 3000
+DISCORD_TOKEN=token_du_bot
+CLIENT_ID=application_id
+GUILD_ID=id_de_votre_serveur_discord
+BOT_LANG=fr
+DEFAULT_TZ=Europe/Paris
+
+# Optionnel : vote en un clic (voir plus bas). Décommentez les deux lignes.
+# PUBLIC_BASE_URL=https://vote.example.com
+# MARK_SECRET=
 ```
 
-3. Démarrez avec Docker Compose :
+### 4. Démarrer
+
 ```bash
-docker-compose up -d
+docker compose up -d
+docker compose logs -f   # pour suivre le démarrage
 ```
 
-### Installation manuelle
+Au démarrage, le bot enregistre ses commandes slash sur votre serveur. Un administrateur ajoute ensuite les sites de vote avec `/addvote`, et les joueurs s'abonnent avec `/subscribe`.
 
-1. Clonez le dépôt :
+### Mettre à jour
+
 ```bash
-git clone https://github.com/mrddream/ReminderVoteBot.git
-cd ReminderVoteBot
+docker compose pull && docker compose up -d
 ```
 
-2. Installez les dépendances :
-```bash
-npm install
-```
+Les abonnements et les sites de vote sont conservés dans le volume Docker `bot_data`.
 
-3. Créez un fichier `.env` (voir la section configuration ci-dessus)
+> **Mise à jour depuis une image antérieure au 27 octobre 2026** : le conteneur ne tourne plus en root. Si le bot refuse de démarrer en signalant des données non modifiables, lancez une seule fois :
+> ```bash
+> docker compose run --rm --user root bot chown -R node:node /app/data
+> ```
 
-4. Déployez les commandes Discord :
-```bash
-npm run deploy:commands
-```
+### Vote en un clic (optionnel)
 
-5. Démarrez le bot :
-```bash
-npm start
-```
+Par défaut, *Voter maintenant* ouvre directement le site de vote, et le joueur clique sur *J'ai voté* pour relancer son délai. Pour que le vote soit enregistré automatiquement :
+
+1. Rendez le bot joignable depuis Internet sur un domaine en HTTPS, par exemple avec un reverse proxy (Caddy, Nginx, Traefik…) vers le port `3000` du conteneur.
+2. Dans le `.env`, renseignez `PUBLIC_BASE_URL` avec ce domaine et `MARK_SECRET` avec une clé d'au moins 32 caractères (`openssl rand -hex 32`).
+3. Relancez : `docker compose up -d`.
+
+Le bouton passe alors par un lien personnel, signé et valable 7 jours, qui enregistre le vote puis redirige vers le site. En mode mention dans un salon, ce lien est envoyé au joueur en privé, pour que les autres membres ne puissent pas voter à sa place.
 
 ## Configuration
 
-### Variables d'environnement
-
 | Variable | Requis | Description | Par défaut |
 |----------|--------|-------------|------------|
-| `DISCORD_TOKEN` | Oui | Token de votre bot Discord | - |
-| `CLIENT_ID` | Oui | ID client de votre application Discord | - |
-| `GUILD_ID` | Oui | ID du serveur Discord du bot : les commandes y sont déployées uniquement, et les commandes admin ne fonctionnent que là | - |
-| `DEFAULT_TZ` | Non | Fuseau horaire par défaut pour les rappels | `Europe/Paris` |
-| `BOT_LANG` | Non | Langue du bot (`en` ou `fr`) | `fr` |
-| `PUBLIC_BASE_URL` | Non | URL de base pour le service de redirection de vote | - |
-| `MARK_SECRET` | Avec `PUBLIC_BASE_URL` | Clé secrète (32 caractères minimum) pour signer les liens de vote ; le bot refuse de démarrer sans elle si `PUBLIC_BASE_URL` est défini | - |
-| `PORT` | Non | Port du serveur HTTP | `3000` |
+| `DISCORD_TOKEN` | Oui | Token du bot | - |
+| `CLIENT_ID` | Oui | Application ID du bot | - |
+| `GUILD_ID` | Oui | ID du serveur Discord du bot : les commandes n'existent que là, et les commandes admin ne fonctionnent que là | - |
+| `BOT_LANG` | Non | Langue du bot : `fr` ou `en` | `fr` |
+| `DEFAULT_TZ` | Non | Fuseau proposé par défaut aux joueurs (ex. `Europe/Paris`, `America/Toronto`) | `Europe/Paris` |
+| `PUBLIC_BASE_URL` | Non | Domaine public du bot, pour le vote en un clic | - |
+| `MARK_SECRET` | Avec `PUBLIC_BASE_URL` | Clé de signature des liens de vote, 32 caractères minimum | - |
+| `PORT` | Non | Port du serveur HTTP du bot | `3000` |
 
-### Stockage des données
-
-Le bot stocke les données dans le répertoire `data/` :
-- `data/config.json` : Configuration du bot et URLs de vote
-- `data/subscriptions.json` : Abonnements des utilisateurs
-
-Les fichiers sont écrits de façon atomique et la version précédente est conservée dans `*.json.bak`. Si un fichier est corrompu, le bot le restaure depuis la copie `.bak` ; si c'est impossible, il refuse de démarrer au lieu d'écraser vos données.
-
-**Important** : Assurez-vous de sauvegarder régulièrement le répertoire `data/` !
+Le bot vérifie sa configuration au démarrage et s'arrête avec un message explicite si quelque chose manque ou est invalide.
 
 ## Utilisation
 
-### Commandes utilisateur
+### Commandes des joueurs
 
-#### `/subscribe`
-S'abonner aux rappels de vote. Vous pouvez configurer :
-- **Serveur** : Choisissez le serveur de vote pour lequel recevoir des rappels (les serveurs auxquels vous êtes déjà abonné sont signalés et ne peuvent pas être choisis deux fois)
-- **Fenêtre horaire** : Choisissez un préréglage (toute la journée, journée, matin, après-midi, soirée) ou **Personnalisée…** pour saisir n'importe quelle heure de début et de fin (ex. `9h`, `21:30`)
-- **Mode** : Message privé, ou mention dans le salon du serveur (proposé seulement si l'admin en a configuré un)
-- **Fuseau horaire** : Choisissez votre fuseau (affiché avec son décalage UTC et l'heure locale actuelle)
+| Commande | Rôle |
+|----------|------|
+| `/subscribe` | S'abonner aux rappels d'un site de vote : plage horaire (préréglée ou personnalisée, ex. `9h`–`21:30`), mode (MP ou mention dans le salon du site) et fuseau horaire. Le formulaire indique quand partira le premier rappel. |
+| `/status` | Voir ses abonnements (dernier vote, prochain rappel), les modifier, les supprimer, ou réactiver un abonnement mis en pause. |
+| `/unsubscribe` | Se désabonner d'un site ou de tous. |
 
-Le formulaire indique quand le premier rappel sera envoyé.
-
-#### `/unsubscribe`
-Se désabonner des rappels de vote. Vous pouvez supprimer un abonnement spécifique ou tous les abonnements.
-
-#### `/status`
-Visualisez vos abonnements actuels, incluant :
-- Nom du serveur
-- Fenêtre horaire et fuseau horaire
-- Mode de livraison
-- Période de cooldown
-- Dernier vote enregistré et prochain rappel (en timestamps Discord, affichés dans votre propre fuseau)
-
-Vous pouvez également modifier (fenêtre horaire, mode, fuseau) ou supprimer des abonnements depuis cette interface. Si un abonnement a été mis en pause parce que les rappels n'arrivaient pas, un bouton **Réactiver** apparaît.
-
-### Messages de rappel
-Chaque rappel indique le serveur de vote et propose trois boutons :
-- **Voter maintenant** : ouvre la page de vote (et enregistre le vote automatiquement si `PUBLIC_BASE_URL` est configuré)
+Chaque rappel propose trois boutons :
+- **Voter maintenant** : ouvre la page de vote, et enregistre le vote si le vote en un clic est activé
 - **✅ J'ai voté** : enregistre le vote et relance le délai ; le message est mis à jour
 - **⏰ Dans 30 min** : reporte le rappel de 30 minutes
 
-### Commandes administrateur
+### Commandes des administrateurs
 
-#### `/addvote [delai] [salon]`
-Ajouter une nouvelle URL de vote. Nécessite la permission "Gérer le serveur".
-- Option **delai** (optionnelle) : 1h, 2h, 3h, 4h, 12h ou 24h (2h par défaut)
-- Option **salon** (optionnelle) : salon utilisé pour le mode ping
+Elles demandent la permission « Gérer le serveur » sur le serveur `GUILD_ID`.
 
-Un formulaire demande ensuite :
-- **Nom** : Nom d'affichage pour le serveur de vote
-- **URL** : L'URL de vote (`https://`, 400 caractères maximum). Placez `{pseudo}` à l'endroit où doit aller le pseudo de l'utilisateur (ex. `https://site/vote/{pseudo}`) ; sinon, `?pseudo=<pseudo>` est ajouté à l'URL
+| Commande | Rôle |
+|----------|------|
+| `/addvote [delai] [salon]` | Ajouter un site de vote : délai entre deux votes (1 h, 2 h, 3 h, 4 h, 12 h ou 24 h ; 2 h par défaut), salon pour le mode mention (optionnel), puis nom et URL dans un formulaire. |
+| `/listvote` | Gérer les sites : nombre d'abonnés, délai et salon modifiables par menus, nom et URL, suppression (les abonnements au site sont supprimés aussi). |
 
-25 URLs de vote au maximum peuvent être configurées.
-
-#### `/listvote`
-Lister et gérer les URLs de vote existantes. Vous pouvez :
-- Voir tous les serveurs de vote configurés et leur nombre d'abonnés
-- Changer le délai et le salon de ping directement depuis des menus
-- Modifier le nom et l'URL
-- Supprimer des serveurs de vote (leurs abonnements sont aussi supprimés)
+**URL de vote** : en `https://`, 400 caractères maximum. Placez `{pseudo}` à l'endroit où doit aller le pseudo du joueur (ex. `https://site-de-vote.example/vote/{pseudo}`) ; sans `{pseudo}`, `?pseudo=<pseudo>` est ajouté à l'URL. Le pseudo utilisé est le surnom du joueur sur votre serveur.
 
 ## Fonctionnement
 
-1. **Abonnement** : Les utilisateurs s'abonnent avec `/subscribe` et configurent leurs préférences
-2. **Planification** : Chaque minute, le bot vérifie pour chaque abonnement si un rappel est dû
-3. **Fenêtre horaire** : Les rappels ne sont envoyés que pendant la fenêtre horaire configurée (dans le fuseau horaire de l'utilisateur). Un rappel dû en dehors de la fenêtre part à son ouverture
-4. **Cooldown** : Après l'envoi d'un rappel ou le marquage d'un vote, le bot attend la période de cooldown avant d'envoyer un autre rappel. Un rappel ignoré est donc relancé à chaque cooldown jusqu'au vote
-5. **Livraison** : Les rappels sont envoyés par MP ou comme mention dans un salon, selon la préférence de l'utilisateur (repli en MP si le salon échoue). Après 3 échecs d'envoi consécutifs, l'abonnement est mis en pause et `/status` explique comment le réactiver
-6. **Suivi des votes** : Les votes sont enregistrés avec le bouton **J'ai voté**, ou automatiquement via le lien **Voter maintenant** si `PUBLIC_BASE_URL` est configuré
+1. Chaque minute, le bot vérifie si un rappel est dû pour chaque abonnement.
+2. Un rappel part quand le délai du site est écoulé depuis le dernier vote ou le dernier rappel, et que le joueur est dans sa plage horaire (dans son fuseau). S'il devient dû en dehors de la plage, il part à son ouverture.
+3. Tant que le joueur ne vote pas, le rappel est relancé à chaque délai.
+4. Le vote est enregistré par *J'ai voté*, ou automatiquement avec le vote en un clic. Le délai repart de ce moment.
+5. Si la mention dans le salon échoue (salon supprimé, permissions…), le rappel est envoyé en MP. Après 3 échecs d'envoi consécutifs (MP fermés par exemple), l'abonnement est mis en pause et `/status` propose de le réactiver.
 
-## Docker
+## Données et sauvegarde
 
-### Développement
+Les données sont dans le volume `bot_data` (`/app/data` dans le conteneur) :
+- `config.json` : sites de vote et réglages
+- `subscriptions.json` : abonnements
 
-Utilisez `docker-compose-dev.yml` pour construire l'image à partir des sources locales.
+Chaque écriture est atomique, et la version précédente est gardée en `.bak`. Si un fichier est corrompu, le bot le restaure depuis la copie ; sinon, il refuse de démarrer plutôt que d'écraser vos données.
 
-Lancez les tests unitaires avec `npm test` et le linter avec `npm run lint`.
-
-### Production
-
-Le fichier `docker-compose.yml` est configuré pour une utilisation en production avec :
-- Déploiement automatique des commandes au démarrage
-- Persistance des volumes pour les données
-- Contrôle de santé Docker sur `/health`
-- Arrêt propre sur `docker stop` (les modifications en attente sont enregistrées)
-- Mappage de port pour le serveur HTTP
-
-Le conteneur tourne avec l'utilisateur non privilégié `node`. Les images publiées avant ce changement tournaient en root : si votre volume `bot_data` vient d'une telle image, donnez-le une fois à l'utilisateur `node` (sinon le bot refuse de démarrer et affiche cette commande) :
+Pour faire une sauvegarde :
 
 ```bash
-docker compose run --rm --user root bot chown -R node:node /app/data
+docker compose cp bot:/app/data ./sauvegarde-data
 ```
-
-### Image Docker (CI)
-
-Le workflow GitHub Actions `.github/workflows/docker.yml` lance les tests sous Node.js 26, puis construit l'image pour `linux/amd64` et `linux/arm64` :
-- push sur `main` → publie `ghcr.io/mrddream/remindervotebot:latest` (et un tag `sha-…`)
-- tag `vX.Y.Z` → publie aussi `X.Y.Z` et `X.Y`
-- pull request → lance les tests et construit l'image sans la publier
-
-Pour mettre à jour un serveur : `docker compose pull && docker compose up -d`.
-
-## Structure du projet
-
-```
-ReminderVoteBot/
-├── src/
-│   ├── index.js          # Logique principale du bot
-│   ├── config.js         # Gestion de la configuration
-│   ├── storage.js        # Stockage des abonnements
-│   ├── schedule.js       # Règles de planification (fenêtres horaires, cooldown, report)
-│   ├── jsonFile.js       # Écriture JSON atomique avec sauvegarde .bak
-│   ├── token.js          # Liens de vote /v signés
-│   ├── voteUrl.js        # Validation et identifiants des URLs de vote
-│   ├── constants.js      # Valeurs partagées avec deploy-commands.js
-│   ├── paths.js          # Dossier des données
-│   └── deploy-commands.js # Déploiement des commandes Discord
-├── data/                 # Répertoire de données (créé à l'exécution)
-│   ├── config.json       # Configuration du bot
-│   └── subscriptions.json # Abonnements des utilisateurs
-├── test/                 # Tests unitaires (npm test)
-├── Dockerfile            # Définition de l'image Docker
-├── docker-compose.yml    # Docker Compose de production
-├── docker-compose-dev.yml # Docker Compose de développement
-├── package.json          # Dépendances Node.js
-└── README.fr.md         # Ce fichier
-```
-
-## Fonctionnalités détaillées
-
-### Fenêtres horaires
-- Les utilisateurs choisissent un préréglage ou saisissent n'importe quelle heure de début et de fin (`HH:MM`, `9h`, `21h30`…)
-- Supporte les fenêtres nocturnes (ex. 22:00-06:00)
-- Chaque abonnement a son propre fuseau horaire (par défaut : `DEFAULT_TZ`)
-
-### Système de cooldown
-- Chaque serveur de vote peut avoir sa propre période de cooldown
-- Le cooldown par défaut est de 2 heures (120 minutes)
-- Valeurs supportées : 60, 120, 180, 240, 720, 1440 minutes
-- Le timer se réinitialise lorsque l'utilisateur clique sur "J'ai voté" (ou sur "Voter maintenant" si `PUBLIC_BASE_URL` est configuré)
-
-### Plusieurs serveurs de vote
-- Les administrateurs peuvent ajouter plusieurs serveurs de vote
-- Chaque serveur a sa propre URL, son cooldown et un salon de ping optionnel
-- Les utilisateurs peuvent s'abonner à différents serveurs avec différentes configurations
-
-### Service de redirection de vote
-Si `PUBLIC_BASE_URL` est configuré :
-- Le bot fournit un service de redirection sécurisé à `/v?t=<token>`
-- Les tokens sont signés avec HMAC-SHA256 (`MARK_SECRET`), identifient l'abonnement pour que le vote soit enregistré sur le bon serveur, et expirent après 7 jours
-- En mode ping salon, le bouton **Voter maintenant** donne à l'abonné son lien personnel en privé : les autres membres ne peuvent pas voter à sa place
-- Suit automatiquement quand les utilisateurs votent et met à jour le message de rappel
-- Revient à l'URL de vote directe si non configuré
 
 ## Dépannage
 
-### Le bot ne répond pas
-- Vérifiez que le token du bot est correct
-- Vérifiez que le bot a les permissions nécessaires (Envoyer des messages, Messages privés)
-- Consultez les logs du bot pour les erreurs
-
-### Les rappels ne sont pas envoyés
-- Vérifiez que la fenêtre horaire est correctement configurée
-- Vérifiez que la période de cooldown s'est écoulée (`/status` affiche le prochain rappel)
-- Assurez-vous que le bot peut envoyer des MP ou accéder au salon configuré ; un abonnement mis en pause après des échecs d'envoi se réactive depuis `/status`
-- Vérifiez les paramètres de fuseau horaire
-
-### Les commandes n'apparaissent pas
-- Exécutez `npm run deploy:commands` pour déployer les commandes
-- Les commandes n'existent que sur le serveur `GUILD_ID` (le déploiement supprime aussi les commandes globales des anciennes versions)
-- `/addvote` et `/listvote` demandent la permission « Gérer le serveur » sur ce serveur
+| Problème | Que vérifier |
+|----------|--------------|
+| Le conteneur s'arrête au démarrage | `docker compose logs bot` : le message indique la variable manquante ou invalide, ou la commande `chown` à lancer. |
+| Les commandes n'apparaissent pas | `GUILD_ID` est bien l'ID de votre serveur, et le bot y a été invité avec le scope `applications.commands`. Redémarrez le conteneur : les commandes sont enregistrées à chaque démarrage. |
+| `/addvote` ou `/listvote` refusé | Il faut la permission « Gérer le serveur » sur le serveur `GUILD_ID`. |
+| Pas de rappel | `/status` affiche le prochain rappel. Vérifiez la plage horaire et le fuseau, et que le joueur accepte les MP des membres du serveur. Un abonnement en pause se réactive depuis `/status`. |
+| Le vote en un clic ne marche pas | `PUBLIC_BASE_URL` doit pointer vers le bot en HTTPS (`https://votre-domaine/health` doit répondre `{"ok":true}`). |
 
 ## Licence
 
-Ce projet est sous licence MIT - voir le fichier [LICENSE](LICENSE) pour plus de détails.
+Projet sous licence MIT, voir [LICENSE](LICENSE).
 
-## Contribution
+## Contribution et support
 
-Les contributions sont les bienvenues ! N'hésitez pas à soumettre une Pull Request.
-
-## Support
-
-Pour les problèmes, questions ou demandes de fonctionnalités, veuillez ouvrir une issue sur GitHub.
+Les contributions sont les bienvenues : ouvrez une issue ou une pull request sur GitHub.
 
 ---
 
 Fait avec ❤️ par MrDDream
-

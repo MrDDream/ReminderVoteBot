@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env.js';
 import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
 
 const clientId = process.env.CLIENT_ID;

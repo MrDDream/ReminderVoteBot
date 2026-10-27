@@ -17,7 +17,7 @@ Un bot Discord qui envoie des rappels de vote automatisés aux utilisateurs abon
 
 ## Prérequis
 
-- Node.js 20 ou supérieur
+- Node.js 26 ou supérieur
 - Un token de bot Discord ([Discord Developer Portal](https://discord.com/developers/applications))
 - (Optionnel) Docker et Docker Compose pour un déploiement conteneurisé
 

@@ -1,5 +1,5 @@
-import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, time, TimestampStyles } from 'discord.js';
+import './env.js';
+import { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, Events, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder, EmbedBuilder, MessageFlags, time, TimestampStyles } from 'discord.js';
 import cron from 'node-cron';
 import express from 'express';
 import crypto from 'crypto';
@@ -260,7 +260,7 @@ function asUpdate(payload) {
 }
 
 function asReply(payload) {
-	return { ...payload, ephemeral: true };
+	return { ...payload, flags: MessageFlags.Ephemeral };
 }
 
 // ---------- Shared form components (subscribe + status edit) ----------

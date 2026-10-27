@@ -17,7 +17,7 @@ A Discord bot that sends automated vote reminders to subscribed users via direct
 
 ## Prerequisites
 
-- Node.js 20 or higher
+- Node.js 26 or higher
 - A Discord Bot Token ([Discord Developer Portal](https://discord.com/developers/applications))
 - (Optional) Docker and Docker Compose for containerized deployment
 

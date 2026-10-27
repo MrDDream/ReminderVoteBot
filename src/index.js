@@ -41,6 +41,27 @@ const client = new Client({
 
 let subscriptions = loadSubscriptions(); // v4 schema
 let config = loadConfig();
+
+// Subscription changes are written at most once per second: a burst of reminders
+// or clicks rewrites the file once instead of once per change.
+const SAVE_DELAY_MS = 1000;
+let saveTimer = null;
+
+function persistSubscriptions() {
+	if (!saveTimer) saveTimer = setTimeout(flushSubscriptions, SAVE_DELAY_MS);
+}
+
+function flushSubscriptions() {
+	if (!saveTimer) return;
+	clearTimeout(saveTimer);
+	saveTimer = null;
+	try {
+		saveSubscriptions(subscriptions);
+	} catch (err) {
+		log('error', 'Echec de la sauvegarde des abonnements, nouvel essai', { error: serializeError(err) });
+		persistSubscriptions();
+	}
+}
 const DEFAULT_COOLDOWN_MINUTES = 120;
 const MAX_VOTE_ENTRIES = 25; // Discord select menus show at most 25 options
 // Repeated hits of the same /v link within this delay do not record the vote again.
@@ -697,7 +718,7 @@ function updateVoteEntry(entryId, fields) {
 				updatedSubs += 1;
 			}
 		}
-		if (updatedSubs > 0) saveSubscriptions(subscriptions);
+		if (updatedSubs > 0) persistSubscriptions();
 	}
 	return updatedEntry;
 }
@@ -713,7 +734,7 @@ function deleteVoteEntry(entryId) {
 	const before = subscriptions.length;
 	subscriptions = subscriptions.filter(sub => sub.voteUrlId !== entryId);
 	const removed = before - subscriptions.length;
-	if (removed > 0) saveSubscriptions(subscriptions);
+	if (removed > 0) persistSubscriptions();
 	return removed;
 }
 
@@ -962,7 +983,7 @@ async function sendVoteReminder(sub) {
 			log('warn', 'Abonnement mis en pause apres plusieurs echecs', context);
 		}
 	}
-	saveSubscriptions(subscriptions);
+	persistSubscriptions();
 }
 
 function markVoted(sub) {
@@ -970,7 +991,7 @@ function markVoted(sub) {
 	sub.snoozeUntil = null;
 	sub.paused = false;
 	sub.failedDeliveries = 0;
-	saveSubscriptions(subscriptions);
+	persistSubscriptions();
 }
 
 // Best effort: show the vote as recorded on the last reminder message (used by the web redirect).
@@ -988,6 +1009,19 @@ async function refreshLastReminderMessage(sub) {
 // ---------- Scheduling ----------
 
 let reminderTickRunning = false;
+let reminderCronTask = null;
+const REMINDER_CONCURRENCY = 5;
+
+function isSubscriptionDue(sub, now) {
+	// Subscriptions whose vote entry no longer exists are never reminded with another server's link.
+	if (!sub.userId || !getVoteUrlEntryById(sub.voteUrlId)) return false;
+	try {
+		return isReminderDue(sub, getCooldownMsForSubscriber(sub), now, getSubscriptionTimezone(sub));
+	} catch (err) {
+		log('error', 'Erreur lors du calcul du prochain rappel', { subscriptionId: sub.id, error: serializeError(err) });
+		return false;
+	}
+}
 
 // A single loop checks every subscription each minute: a reminder is due when the
 // cooldown since the last reminder/vote has elapsed and the user is inside their window.
@@ -997,16 +1031,17 @@ async function runReminderTick() {
 	try {
 		const now = Date.now();
 		sweepExpiredForms(now);
-		for (const sub of [...subscriptions]) {
-			// Subscriptions whose vote entry no longer exists are never reminded with another server's link.
-			if (!sub.userId || !getVoteUrlEntryById(sub.voteUrlId)) continue;
-			if (!subscriptions.includes(sub)) continue;
-			try {
-				if (!isReminderDue(sub, getCooldownMsForSubscriber(sub), now, getSubscriptionTimezone(sub))) continue;
-				await sendVoteReminder(sub);
-			} catch (err) {
-				log('error', 'Erreur lors de lexecution de la tache de rappel', { subscriptionId: sub.id, userId: sub.userId, error: serializeError(err) });
-			}
+		const due = subscriptions.filter(sub => isSubscriptionDue(sub, now));
+		for (let i = 0; i < due.length; i += REMINDER_CONCURRENCY) {
+			await Promise.all(due.slice(i, i + REMINDER_CONCURRENCY).map(async sub => {
+				// Deleted while earlier reminders were being sent.
+				if (!subscriptions.includes(sub)) return;
+				try {
+					await sendVoteReminder(sub);
+				} catch (err) {
+					log('error', 'Erreur lors de l’envoi du rappel', { subscriptionId: sub.id, userId: sub.userId, error: serializeError(err) });
+				}
+			}));
 		}
 	} finally {
 		reminderTickRunning = false;
@@ -1015,9 +1050,12 @@ async function runReminderTick() {
 
 client.once(Events.ClientReady, () => {
 	log('info', 'Client pret', { tag: client.user.tag, subscriptions: subscriptions.length });
-	cron.schedule('* * * * *', runReminderTick);
+	reminderCronTask = cron.schedule('* * * * *', runReminderTick);
 	runReminderTick();
 });
+
+client.on(Events.Error, err => log('error', 'Erreur du client Discord', { error: serializeError(err) }));
+process.on('unhandledRejection', reason => log('error', 'Promesse rejetee non geree', { error: serializeError(reason) }));
 
 // ---------- Interaction handlers ----------
 
@@ -1077,7 +1115,7 @@ async function handleAddVoteModal(interaction, cooldownRaw, channelRaw) {
 			sub.voteUrlId = entry.id;
 			if (sub.mode === 'channel') sub.channelId = entry.channelId;
 		}
-		if (orphans.length > 0) saveSubscriptions(subscriptions);
+		if (orphans.length > 0) persistSubscriptions();
 	}
 	syncLegacyVoteBaseUrl();
 	saveConfig(config);
@@ -1188,7 +1226,7 @@ async function handleSubscribeConfirm(interaction, formId) {
 		timezone: form.timezone,
 		guildId: form.guildId || interaction.guildId || null
 	});
-	saveSubscriptions(subscriptions);
+	persistSubscriptions();
 	forms.delete(formId);
 	log('info', 'Utilisateur inscrit aux rappels', {
 		subscriptionId: record.id,
@@ -1227,7 +1265,7 @@ async function handleEditConfirm(interaction, formId) {
 	// Changing the delivery settings is the way out of a paused subscription.
 	sub.paused = false;
 	sub.failedDeliveries = 0;
-	saveSubscriptions(subscriptions);
+	persistSubscriptions();
 	forms.delete(formId);
 	log('info', 'Abonnement modifie via status', { userId, subscriptionId: sub.id, mode: sub.mode, channelId: sub.channelId, window: sub.window, timezone: sub.timezone });
 	await interaction.update(asUpdate(renderStatus(userId, sub.id, tr('✅ Modifications enregistrées.', '✅ Changes saved.'))));
@@ -1253,12 +1291,12 @@ async function handleStatusButton(interaction, action, subscriptionId) {
 	} else if (action === 'status-resume') {
 		sub.paused = false;
 		sub.failedDeliveries = 0;
-		saveSubscriptions(subscriptions);
+		persistSubscriptions();
 		log('info', 'Abonnement reactive via status', { userId, subscriptionId: sub.id });
 		await interaction.update(asUpdate(renderStatus(userId, sub.id, tr('▶️ Abonnement réactivé.', '▶️ Subscription resumed.'))));
 	} else if (action === 'status-delete') {
 		removeSubscription(subscriptions, sub.id);
-		saveSubscriptions(subscriptions);
+		persistSubscriptions();
 		log('info', 'Abonnement supprime via status', { userId, subscriptionId: sub.id });
 		await interaction.update(asUpdate(renderStatus(userId, null, tr('🗑️ Abonnement {label} supprimé.', '🗑️ Subscription {label} deleted.', { label: voteEntryLabel(sub.voteUrlId) }))));
 	}
@@ -1272,7 +1310,7 @@ async function handleUnsubscribeConfirm(interaction, choice) {
 	} else if (findUserSubscription(userId, choice)) {
 		removed = removeSubscription(subscriptions, choice) ? 1 : 0;
 	}
-	if (removed > 0) saveSubscriptions(subscriptions);
+	if (removed > 0) persistSubscriptions();
 	log('info', 'Utilisateur desinscrit', { userId, removed, scope: choice });
 	await interaction.update(asUpdate({
 		content: removed > 0
@@ -1355,7 +1393,7 @@ async function handleReminderButton(interaction, action, subscriptionId) {
 	}
 	if (action === 'reminder-snooze') {
 		sub.snoozeUntil = Date.now() + SNOOZE_MINUTES * 60 * 1000;
-		saveSubscriptions(subscriptions);
+		persistSubscriptions();
 		log('info', 'Rappel reporte', { userId: sub.userId, subscriptionId: sub.id });
 		// Only the embed changes: the buttons stay as they are, no need to rebuild the vote link.
 		await interaction.update({ embeds: [buildReminderSnoozedEmbed(sub)] });
@@ -1538,9 +1576,24 @@ app.get('/v', async (req, res) => {
 	}
 });
 
-client.login(token);
-
-// Start HTTP server
-app.listen(PORT, () => {
+const server = app.listen(PORT, err => {
+	if (err) {
+		log('error', 'Impossible de demarrer le serveur HTTP', { port: PORT, error: serializeError(err) });
+		process.exit(1);
+	}
 	log('info', 'HTTP redirect server listening', { port: PORT });
 });
+
+client.login(token);
+
+// docker stop sends SIGTERM: write pending changes and disconnect cleanly.
+async function shutdown(signal) {
+	log('info', 'Arret du bot', { signal });
+	reminderCronTask?.stop();
+	flushSubscriptions();
+	server.close();
+	await client.destroy();
+	process.exit(0);
+}
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));

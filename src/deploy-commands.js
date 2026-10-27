@@ -1,5 +1,5 @@
-import 'dotenv/config';
-import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
+import './env.js';
+import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
 
 const clientId = process.env.CLIENT_ID;
 const guildId = process.env.GUILD_ID;
@@ -12,8 +12,8 @@ const DESCRIPTIONS = {
 		en: 'Subscribe to vote reminders.'
 	},
 	unsubscribe: {
-		fr: 'Arrêter les MP de rappel de vote.',
-		en: 'Stop vote reminder DMs.'
+		fr: 'Se désabonner des rappels de vote.',
+		en: 'Unsubscribe from vote reminders.'
 	},
 	addvote: {
 		fr: 'Ajouter une URL de vote via formulaire.',
@@ -24,10 +24,27 @@ const DESCRIPTIONS = {
 		en: 'Manage existing vote URLs.'
 	},
 	status: {
-		fr: 'Voir la configuration actuelle et le nombre d’abonnés.',
-		en: 'View current configuration and subscriber count.'
+		fr: 'Voir et gérer vos abonnements.',
+		en: 'View and manage your subscriptions.'
+	},
+	addvoteCooldown: {
+		fr: 'Délai entre deux votes (2 heures par défaut).',
+		en: 'Cooldown between two votes (2 hours by default).'
+	},
+	addvoteChannel: {
+		fr: 'Salon où mentionner les abonnés en mode ping (optionnel).',
+		en: 'Channel where subscribers are pinged in ping mode (optional).'
 	}
 };
+
+const COOLDOWN_CHOICES = [
+	{ minutes: 60, fr: '1 heure', en: '1 hour' },
+	{ minutes: 120, fr: '2 heures', en: '2 hours' },
+	{ minutes: 180, fr: '3 heures', en: '3 hours' },
+	{ minutes: 240, fr: '4 heures', en: '4 hours' },
+	{ minutes: 720, fr: '12 heures', en: '12 hours' },
+	{ minutes: 1440, fr: '24 heures', en: '24 hours' }
+];
 
 const commands = [
 	new SlashCommandBuilder()
@@ -39,7 +56,19 @@ const commands = [
 	new SlashCommandBuilder()
 		.setName('addvote')
 		.setDescription(DESCRIPTIONS.addvote[BOT_LANG])
-		.setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+		.setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+		.addIntegerOption(option => option
+			.setName('cooldown')
+			.setNameLocalizations({ fr: 'delai' })
+			.setDescription(DESCRIPTIONS.addvoteCooldown[BOT_LANG])
+			.setRequired(false)
+			.addChoices(...COOLDOWN_CHOICES.map(choice => ({ name: choice[BOT_LANG], value: choice.minutes }))))
+		.addChannelOption(option => option
+			.setName('channel')
+			.setNameLocalizations({ fr: 'salon' })
+			.setDescription(DESCRIPTIONS.addvoteChannel[BOT_LANG])
+			.setRequired(false)
+			.addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
 	new SlashCommandBuilder()
 		.setName('listvote')
 		.setDescription(DESCRIPTIONS.listvote[BOT_LANG])

@@ -1,11 +1,11 @@
-FROM node:20-alpine
+FROM node:26-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
 
 # Install dependencies separately to leverage Docker cache
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # Copy source
 COPY src ./src

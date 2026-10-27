@@ -1,7 +1,6 @@
-version: "3.9"
 services:
   bot:
-    buid: .
+    build: .
     container_name: ReminderVoteBot
     restart: unless-stopped
     command: >

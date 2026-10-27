@@ -17,7 +17,7 @@ Un bot Discord qui envoie des rappels de vote automatisés aux utilisateurs abon
 
 ## Prérequis
 
-- Node.js 20 ou supérieur
+- Node.js 26 ou supérieur
 - Un token de bot Discord ([Discord Developer Portal](https://discord.com/developers/applications))
 - (Optionnel) Docker et Docker Compose pour un déploiement conteneurisé
 
@@ -95,6 +95,8 @@ Le bot stocke les données dans le répertoire `data/` :
 - `data/config.json` : Configuration du bot et URLs de vote
 - `data/subscriptions.json` : Abonnements des utilisateurs
 
+Les fichiers sont écrits de façon atomique et la version précédente est conservée dans `*.json.bak`. Si un fichier est corrompu, le bot le restaure depuis la copie `.bak` ; si c'est impossible, il refuse de démarrer au lieu d'écraser vos données.
+
 **Important** : Assurez-vous de sauvegarder régulièrement le répertoire `data/` !
 
 ## Utilisation
@@ -103,53 +105,66 @@ Le bot stocke les données dans le répertoire `data/` :
 
 #### `/subscribe`
 S'abonner aux rappels de vote. Vous pouvez configurer :
-- **Serveur** : Choisissez le serveur de vote pour lequel recevoir des rappels
-- **Fenêtre horaire** : Définissez les heures de début et de fin pour les rappels (par incréments de 30 minutes)
-- **Mode** : Choisissez entre MP (message privé) ou mention dans un salon
+- **Serveur** : Choisissez le serveur de vote pour lequel recevoir des rappels (les serveurs auxquels vous êtes déjà abonné sont signalés et ne peuvent pas être choisis deux fois)
+- **Fenêtre horaire** : Choisissez un préréglage (toute la journée, journée, matin, après-midi, soirée) ou **Personnalisée…** pour saisir n'importe quelle heure de début et de fin (ex. `9h`, `21:30`)
+- **Mode** : Message privé, ou mention dans le salon du serveur (proposé seulement si l'admin en a configuré un)
+- **Fuseau horaire** : Choisissez votre fuseau (affiché avec son décalage UTC et l'heure locale actuelle)
+
+Le formulaire indique quand le premier rappel sera envoyé.
 
 #### `/unsubscribe`
 Se désabonner des rappels de vote. Vous pouvez supprimer un abonnement spécifique ou tous les abonnements.
 
 #### `/status`
 Visualisez vos abonnements actuels, incluant :
-- Nom et ID du serveur
-- Fenêtre horaire
-- Fuseau horaire
+- Nom du serveur
+- Fenêtre horaire et fuseau horaire
 - Mode de livraison
 - Période de cooldown
-- Timer du prochain rappel
+- Dernier vote enregistré et prochain rappel (en timestamps Discord, affichés dans votre propre fuseau)
 
-Vous pouvez également modifier ou supprimer des abonnements depuis cette interface.
+Vous pouvez également modifier (fenêtre horaire, mode, fuseau) ou supprimer des abonnements depuis cette interface. Si un abonnement a été mis en pause parce que les rappels n'arrivaient pas, un bouton **Réactiver** apparaît.
+
+### Messages de rappel
+Chaque rappel indique le serveur de vote et propose trois boutons :
+- **Voter maintenant** : ouvre la page de vote (et enregistre le vote automatiquement si `PUBLIC_BASE_URL` est configuré)
+- **✅ J'ai voté** : enregistre le vote et relance le délai ; le message est mis à jour
+- **⏰ Dans 30 min** : reporte le rappel de 30 minutes
 
 ### Commandes administrateur
 
-#### `/addvote`
-Ajouter une nouvelle URL de vote. Nécessite la permission "Gérer le serveur". Vous devez fournir :
+#### `/addvote [delai] [salon]`
+Ajouter une nouvelle URL de vote. Nécessite la permission "Gérer le serveur".
+- Option **delai** (optionnelle) : 1h, 2h, 3h, 4h, 12h ou 24h (2h par défaut)
+- Option **salon** (optionnelle) : salon utilisé pour le mode ping
+
+Un formulaire demande ensuite :
 - **Nom** : Nom d'affichage pour le serveur de vote
-- **URL** : L'URL de vote (peut inclure le placeholder `{pseudo}`)
-- **Délai** : Période de cooldown en minutes (60, 120, 180, 240, 720, ou 1440)
-- **ID du salon** (optionnel) : Salon par défaut pour le mode mention dans un salon
+- **URL** : L'URL de vote. Placez `{pseudo}` à l'endroit où doit aller le pseudo de l'utilisateur (ex. `https://site/vote/{pseudo}`) ; sinon, `?pseudo=<pseudo>` est ajouté à l'URL
 
 #### `/listvote`
 Lister et gérer les URLs de vote existantes. Vous pouvez :
-- Voir tous les serveurs de vote configurés
-- Modifier les détails d'un serveur de vote
+- Voir tous les serveurs de vote configurés et leur nombre d'abonnés
+- Changer le délai et le salon de ping directement depuis des menus
+- Modifier le nom et l'URL
 - Supprimer des serveurs de vote
 
 ## Fonctionnement
 
 1. **Abonnement** : Les utilisateurs s'abonnent avec `/subscribe` et configurent leurs préférences
-2. **Planification** : Le bot utilise des tâches cron pour vérifier chaque minute si des rappels doivent être envoyés
-3. **Fenêtre horaire** : Les rappels ne sont envoyés que pendant la fenêtre horaire configurée (dans le fuseau horaire de l'utilisateur)
-4. **Cooldown** : Après l'envoi d'un rappel ou le marquage d'un vote, le bot attend la période de cooldown avant d'envoyer un autre rappel
-5. **Livraison** : Les rappels sont envoyés par MP ou comme mention dans un salon, selon la préférence de l'utilisateur
-6. **Suivi des votes** : Lorsque les utilisateurs cliquent sur le bouton de vote, le bot peut suivre les votes (si `PUBLIC_BASE_URL` est configuré)
+2. **Planification** : Chaque minute, le bot vérifie pour chaque abonnement si un rappel est dû
+3. **Fenêtre horaire** : Les rappels ne sont envoyés que pendant la fenêtre horaire configurée (dans le fuseau horaire de l'utilisateur). Un rappel dû en dehors de la fenêtre part à son ouverture
+4. **Cooldown** : Après l'envoi d'un rappel ou le marquage d'un vote, le bot attend la période de cooldown avant d'envoyer un autre rappel. Un rappel ignoré est donc relancé à chaque cooldown jusqu'au vote
+5. **Livraison** : Les rappels sont envoyés par MP ou comme mention dans un salon, selon la préférence de l'utilisateur (repli en MP si le salon échoue). Après 3 échecs d'envoi consécutifs, l'abonnement est mis en pause et `/status` explique comment le réactiver
+6. **Suivi des votes** : Les votes sont enregistrés avec le bouton **J'ai voté**, ou automatiquement via le lien **Voter maintenant** si `PUBLIC_BASE_URL` est configuré
 
 ## Docker
 
 ### Développement
 
-Utilisez `docker-compose-dev.yml` pour le développement avec rechargement à chaud (si configuré).
+Utilisez `docker-compose-dev.yml` pour construire l'image à partir des sources locales.
+
+Lancez les tests unitaires avec `npm test`.
 
 ### Production
 
@@ -159,6 +174,15 @@ Le fichier `docker-compose.yml` est configuré pour une utilisation en productio
 - Point de contrôle de santé à `/health`
 - Mappage de port pour le serveur HTTP
 
+### Image Docker (CI)
+
+Le workflow GitHub Actions `.github/workflows/docker.yml` lance les tests sous Node.js 26, puis construit l'image pour `linux/amd64` et `linux/arm64` :
+- push sur `main` → publie `ghcr.io/mrddream/remindervotebot:latest` (et un tag `sha-…`)
+- tag `vX.Y.Z` → publie aussi `X.Y.Z` et `X.Y`
+- pull request → lance les tests et construit l'image sans la publier
+
+Pour mettre à jour un serveur : `docker compose pull && docker compose up -d`.
+
 ## Structure du projet
 
 ```
@@ -167,10 +191,13 @@ ReminderVoteBot/
 │   ├── index.js          # Logique principale du bot
 │   ├── config.js         # Gestion de la configuration
 │   ├── storage.js        # Stockage des abonnements
+│   ├── schedule.js       # Règles de planification (fenêtres horaires, cooldown, report)
+│   ├── jsonFile.js       # Écriture JSON atomique avec sauvegarde .bak
 │   └── deploy-commands.js # Déploiement des commandes Discord
 ├── data/                 # Répertoire de données (créé à l'exécution)
 │   ├── config.json       # Configuration du bot
 │   └── subscriptions.json # Abonnements des utilisateurs
+├── test/                 # Tests unitaires (npm test)
 ├── Dockerfile            # Définition de l'image Docker
 ├── docker-compose.yml    # Docker Compose de production
 ├── docker-compose-dev.yml # Docker Compose de développement
@@ -181,27 +208,26 @@ ReminderVoteBot/
 ## Fonctionnalités détaillées
 
 ### Fenêtres horaires
-- Les utilisateurs peuvent définir une heure de début et de fin pour les rappels
-- Les heures doivent être par incréments de 30 minutes (ex. 08:00, 08:30, 09:00)
+- Les utilisateurs choisissent un préréglage ou saisissent n'importe quelle heure de début et de fin (`HH:MM`, `9h`, `21h30`…)
 - Supporte les fenêtres nocturnes (ex. 22:00-06:00)
-- Prend en compte les fuseaux horaires en utilisant le fuseau configuré
+- Chaque abonnement a son propre fuseau horaire (par défaut : `DEFAULT_TZ`)
 
 ### Système de cooldown
 - Chaque serveur de vote peut avoir sa propre période de cooldown
 - Le cooldown par défaut est de 2 heures (120 minutes)
 - Valeurs supportées : 60, 120, 180, 240, 720, 1440 minutes
-- Le timer se réinitialise lorsque l'utilisateur clique sur "Voter maintenant" ou utilise le bouton de réinitialisation
+- Le timer se réinitialise lorsque l'utilisateur clique sur "J'ai voté" (ou sur "Voter maintenant" si `PUBLIC_BASE_URL` est configuré)
 
 ### Plusieurs serveurs de vote
 - Les administrateurs peuvent ajouter plusieurs serveurs de vote
-- Chaque serveur a sa propre URL, cooldown et salon par défaut optionnel
+- Chaque serveur a sa propre URL, son cooldown et un salon de ping optionnel
 - Les utilisateurs peuvent s'abonner à différents serveurs avec différentes configurations
 
 ### Service de redirection de vote
 Si `PUBLIC_BASE_URL` est configuré :
 - Le bot fournit un service de redirection sécurisé à `/v?t=<token>`
-- Les tokens sont signés avec HMAC-SHA256
-- Suit automatiquement quand les utilisateurs votent
+- Les tokens sont signés avec HMAC-SHA256 et identifient l'abonnement, pour que le vote soit enregistré sur le bon serveur
+- Suit automatiquement quand les utilisateurs votent et met à jour le message de rappel
 - Revient à l'URL de vote directe si non configuré
 
 ## Dépannage
@@ -213,8 +239,8 @@ Si `PUBLIC_BASE_URL` est configuré :
 
 ### Les rappels ne sont pas envoyés
 - Vérifiez que la fenêtre horaire est correctement configurée
-- Vérifiez que la période de cooldown s'est écoulée
-- Assurez-vous que le bot peut envoyer des MP ou accéder au salon configuré
+- Vérifiez que la période de cooldown s'est écoulée (`/status` affiche le prochain rappel)
+- Assurez-vous que le bot peut envoyer des MP ou accéder au salon configuré ; un abonnement mis en pause après des échecs d'envoi se réactive depuis `/status`
 - Vérifiez les paramètres de fuseau horaire
 
 ### Les commandes n'apparaissent pas

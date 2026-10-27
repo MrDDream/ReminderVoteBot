@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.0.0] - 2026-10-27
+## [1.2.0] - 2026-10-27
 
 ### ⚠️ Upgrade notes (breaking changes)
 - **`GUILD_ID` is now required**: the bot serves a single Discord server. Slash commands are only registered there, and global commands left by older versions are removed.

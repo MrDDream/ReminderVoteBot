@@ -1,279 +1,176 @@
 # ReminderVoteBot
-This documentation is available in [French](README.fr.md) and in [English](README.md)
 
-## Overview
-A Discord bot that sends automated vote reminders to subscribed users via direct messages or channel pings. The bot supports multiple vote servers, customizable time windows, timezone-aware scheduling, and configurable cooldown periods.
+**English** · [Français](README.fr.md) · [Project website](https://mrddream.github.io/ReminderVoteBot/)
+
+[![CI](https://github.com/MrDDream/ReminderVoteBot/actions/workflows/docker.yml/badge.svg)](https://github.com/MrDDream/ReminderVoteBot/actions/workflows/docker.yml)
+[![Docker image](https://img.shields.io/badge/ghcr.io-remindervotebot-2496ED?logo=docker&logoColor=white)](https://github.com/users/MrDDream/packages/container/package/remindervotebot)
+[![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+A Discord bot that reminds your players to vote for your server at the right time: by direct message or channel mention, for each voting site, following their own hours and timezone.
+
+![Reminders, /subscribe, /status and /listvote in Discord](docs/assets/screens-en.png)
 
 ## Features
 
-- 🔔 **Automated Vote Reminders**: Sends reminders via DM or channel pings based on user preferences
-- ⏰ **Time Window Support**: Configure specific hours when reminders should be sent
-- 🌍 **Timezone Aware**: Supports different timezones for accurate scheduling
-- 🎯 **Multiple Vote Servers**: Manage multiple vote URLs with different cooldown periods
-- 🔄 **Cooldown Management**: Configurable cooldown periods (1h, 2h, 3h, 4h, 12h, 24h)
-- 🌐 **Web Redirect**: Optional web interface for secure vote tracking
-- 🌍 **Multilingual**: Supports English and French
-- 📊 **Status Management**: View and manage your subscriptions easily
-
-## Prerequisites
-
-- Node.js 26 or higher
-- A Discord Bot Token ([Discord Developer Portal](https://discord.com/developers/applications))
-- (Optional) Docker and Docker Compose for containerized deployment
+- 🔔 **Reminders by DM or mention** in the channel picked by the admin, with automatic fallback to DM
+- 🕗 **Time windows**: presets (daytime, morning, evening…) or exact hours, overnight windows included
+- 🌍 **Per-player timezone**
+- 🎯 **Several voting sites** (up to 25), each with its own cooldown (1 h to 24 h) and channel; the username is inserted in the URL
+- ✅ **Buttons in the reminder**: *Vote now*, *I voted* (restarts the timer), *In 30 min*
+- ⚡ **One-click voting** (optional): with a public domain, *Vote now* records the vote by itself
+- 📋 **`/status`**: last vote and next reminder, edit or delete in one click
+- 🛡️ **Reliable**: saves with a backup copy, non-root container, admin commands restricted to “Manage Server”
+- 🇬🇧 🇫🇷 English or French
 
 ## Installation
 
-### Using Docker (Recommended)
+The bot ships as a ready-to-use Docker image (`linux/amd64` and `linux/arm64`): all you need is Docker with Docker Compose.
 
-1. Clone the repository:
+### 1. Create the Discord bot
+
+1. On the [Discord Developer Portal](https://discord.com/developers/applications), create an application.
+2. Copy its **Application ID** (*General Information* tab), then in the *Bot* tab, generate and copy the **token**.
+3. Invite the bot to your server with this link, replacing `APPLICATION_ID`:
+   ```
+   https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot%20applications.commands&permissions=19456
+   ```
+   (permissions: view channels, send messages, embed links)
+4. Get your **server ID**: enable *Developer Mode* in Discord settings, then right-click the server → *Copy Server ID*.
+
+### 2. Get the Docker Compose file
+
 ```bash
-git clone https://github.com/mrddream/ReminderVoteBot.git
-cd ReminderVoteBot
+mkdir remindervotebot && cd remindervotebot
+curl -O https://raw.githubusercontent.com/MrDDream/ReminderVoteBot/main/docker-compose.yml
 ```
 
-2. Create a `.env` file in the project root:
+### 3. Create the `.env` file next to it
+
 ```env
-DISCORD_TOKEN=your_discord_bot_token
-CLIENT_ID=your_client_id
-GUILD_ID=your_guild_id  # Required: the Discord server the bot serves
-DEFAULT_TZ=Europe/Paris  # Default timezone
-BOT_LANG=en  # or 'fr' for French
-PUBLIC_BASE_URL=https://your-domain.com  # Optional, for vote redirect
-MARK_SECRET=at_least_32_random_characters  # Required with PUBLIC_BASE_URL (openssl rand -hex 32)
-PORT=3000  # Optional, default is 3000
+DISCORD_TOKEN=bot_token
+CLIENT_ID=application_id
+GUILD_ID=your_discord_server_id
+BOT_LANG=en
+DEFAULT_TZ=Europe/London
+
+# Optional: one-click voting (see below). Uncomment both lines.
+# PUBLIC_BASE_URL=https://vote.example.com
+# MARK_SECRET=
 ```
 
-3. Start with Docker Compose:
+### 4. Start
+
 ```bash
-docker-compose up -d
+docker compose up -d
+docker compose logs -f   # to follow the startup
 ```
 
-### Manual Installation
+On startup, the bot registers its slash commands on your server. An administrator then adds the voting sites with `/addvote`, and players subscribe with `/subscribe`.
 
-1. Clone the repository:
+### Update
+
 ```bash
-git clone https://github.com/mrddream/ReminderVoteBot.git
-cd ReminderVoteBot
+docker compose pull && docker compose up -d
 ```
 
-2. Install dependencies:
-```bash
-npm install
-```
+Subscriptions and voting sites are kept in the `bot_data` Docker volume.
 
-3. Create a `.env` file (see configuration section above)
+> **Updating from an image older than October 27, 2026**: the container no longer runs as root. If the bot refuses to start and reports data it cannot write, run once:
+> ```bash
+> docker compose run --rm --user root bot chown -R node:node /app/data
+> ```
 
-4. Deploy Discord commands:
-```bash
-npm run deploy:commands
-```
+### One-click voting (optional)
 
-5. Start the bot:
-```bash
-npm start
-```
+By default, *Vote now* opens the voting site directly, and the player clicks *I voted* to restart their timer. To record the vote automatically:
+
+1. Make the bot reachable from the Internet on an HTTPS domain, for example with a reverse proxy (Caddy, Nginx, Traefik…) to port `3000` of the container.
+2. In `.env`, set `PUBLIC_BASE_URL` to that domain and `MARK_SECRET` to a key of at least 32 characters (`openssl rand -hex 32`).
+3. Restart: `docker compose up -d`.
+
+The button then goes through a personal link, signed and valid for 7 days, that records the vote and redirects to the site. In channel mention mode, this link is sent to the player privately, so other members cannot vote in their place.
 
 ## Configuration
 
-### Environment Variables
-
 | Variable | Required | Description | Default |
 |----------|----------|-------------|---------|
-| `DISCORD_TOKEN` | Yes | Your Discord bot token | - |
-| `CLIENT_ID` | Yes | Your Discord application client ID | - |
-| `GUILD_ID` | Yes | ID of the Discord server the bot serves: commands are deployed there only, and admin commands only work there | - |
-| `DEFAULT_TZ` | No | Default timezone for reminders | `Europe/Paris` |
-| `BOT_LANG` | No | Bot language (`en` or `fr`) | `fr` |
-| `PUBLIC_BASE_URL` | No | Base URL for vote redirect service | - |
-| `MARK_SECRET` | With `PUBLIC_BASE_URL` | Secret key (32+ characters) for vote token signing; the bot refuses to start without it when `PUBLIC_BASE_URL` is set | - |
-| `PORT` | No | HTTP server port | `3000` |
+| `DISCORD_TOKEN` | Yes | Bot token | - |
+| `CLIENT_ID` | Yes | Bot Application ID | - |
+| `GUILD_ID` | Yes | ID of the bot's Discord server: commands only exist there, and admin commands only work there | - |
+| `BOT_LANG` | No | Bot language: `en` or `fr` | `fr` |
+| `DEFAULT_TZ` | No | Timezone offered to players by default (e.g. `Europe/London`, `America/New_York`) | `Europe/Paris` |
+| `PUBLIC_BASE_URL` | No | Public domain of the bot, for one-click voting | - |
+| `MARK_SECRET` | With `PUBLIC_BASE_URL` | Signing key for vote links, 32 characters minimum | - |
+| `PORT` | No | Port of the bot's HTTP server | `3000` |
 
-### Data Storage
-
-The bot stores data in the `data/` directory:
-- `data/config.json`: Bot configuration and vote URLs
-- `data/subscriptions.json`: User subscriptions
-
-Files are written atomically and the previous version is kept as `*.json.bak`. If a file is corrupted, the bot restores it from the `.bak` copy; if that is not possible, it refuses to start instead of overwriting your data.
-
-**Important**: Make sure to backup the `data/` directory regularly!
+The bot checks its configuration on startup and stops with an explicit message if something is missing or invalid.
 
 ## Usage
 
-### User Commands
+### Player commands
 
-#### `/subscribe`
-Subscribe to vote reminders. You can configure:
-- **Server**: Choose which vote server to receive reminders for (servers you are already subscribed to are marked and cannot be picked twice)
-- **Time Window**: Pick a preset (all day, daytime, morning, afternoon, evening) or **Custom…** to type any start and end time (e.g. `9h`, `21:30`)
-- **Mode**: Direct message, or a ping in the server's channel (only offered when the admin configured one)
-- **Timezone**: Pick your timezone (shown with its UTC offset and current local time)
+| Command | Purpose |
+|---------|---------|
+| `/subscribe` | Subscribe to a voting site's reminders: time window (preset or custom, e.g. `9h`–`21:30`), mode (DM or mention in the site's channel) and timezone. The form shows when the first reminder will be sent. |
+| `/status` | See your subscriptions (last vote, next reminder), edit or delete them, or resume a paused subscription. |
+| `/unsubscribe` | Unsubscribe from one site or all of them. |
 
-The form shows when the first reminder will be sent.
-
-#### `/unsubscribe`
-Unsubscribe from vote reminders. You can remove a specific subscription or all subscriptions.
-
-#### `/status`
-View your current subscriptions, including:
-- Server name
-- Time window and timezone
-- Delivery mode
-- Cooldown period
-- Last recorded vote and next reminder (as Discord timestamps, shown in your own timezone)
-
-You can also edit (time window, mode, timezone) or delete subscriptions from this interface. If a subscription was paused because reminders could not be delivered, a **Resume** button appears.
-
-### Reminder messages
-Each reminder names the vote server and has three buttons:
-- **Vote now**: opens the vote page (and records the vote automatically when `PUBLIC_BASE_URL` is set)
-- **✅ I voted**: records the vote and restarts the cooldown; the message is updated to show it
+Each reminder has three buttons:
+- **Vote now**: opens the voting page, and records the vote when one-click voting is enabled
+- **✅ I voted**: records the vote and restarts the timer; the message is updated
 - **⏰ In 30 min**: snoozes the reminder for 30 minutes
 
-### Administrator Commands
+### Administrator commands
 
-#### `/addvote [cooldown] [channel]`
-Add a new vote URL. Requires "Manage Server" permission.
-- **cooldown** option (optional): 1h, 2h, 3h, 4h, 12h or 24h (default 2h)
-- **channel** option (optional): channel used for the ping mode
+They require the “Manage Server” permission on the `GUILD_ID` server.
 
-A form then asks for:
-- **Name**: Display name for the vote server
-- **URL**: The vote URL (`https://`, 400 characters max). Put `{pseudo}` where the user's display name must go (e.g. `https://site/vote/{pseudo}`); without it, `?pseudo=<name>` is appended to the URL
+| Command | Purpose |
+|---------|---------|
+| `/addvote [cooldown] [channel]` | Add a voting site: cooldown between two votes (1 h, 2 h, 3 h, 4 h, 12 h or 24 h; 2 h by default), channel for mention mode (optional), then name and URL in a form. |
+| `/listvote` | Manage sites: subscriber count, cooldown and channel changed from menus, name and URL, deletion (subscriptions to the site are deleted too). |
 
-At most 25 vote URLs can be configured.
+**Vote URL**: `https://`, 400 characters max. Put `{pseudo}` where the player's name must go (e.g. `https://voting-site.example/vote/{pseudo}`); without `{pseudo}`, `?pseudo=<name>` is appended to the URL. The name used is the player's nickname on your server.
 
-#### `/listvote`
-List and manage existing vote URLs. You can:
-- View all configured vote servers and their subscriber count
-- Change the cooldown and the ping channel directly from menus
-- Edit the name and URL
-- Delete vote servers (their subscriptions are deleted too)
+## How it works
 
-## How It Works
+1. Every minute, the bot checks whether a reminder is due for each subscription.
+2. A reminder is sent when the site's cooldown has elapsed since the last vote or the last reminder, and the player is inside their time window (in their timezone). If it becomes due outside the window, it is sent when the window opens.
+3. As long as the player does not vote, the reminder is repeated every cooldown.
+4. The vote is recorded by *I voted*, or automatically with one-click voting. The cooldown restarts from that moment.
+5. If the channel mention fails (channel deleted, permissions…), the reminder is sent by DM. After 3 consecutive failed deliveries (closed DMs for example), the subscription is paused and `/status` offers to resume it.
 
-1. **Subscription**: Users subscribe using `/subscribe` and configure their preferences
-2. **Scheduling**: Every minute, the bot checks every subscription to see if a reminder is due
-3. **Time Window**: Reminders are only sent during the configured time window (in the user's timezone). If one becomes due outside the window, it is sent when the window opens
-4. **Cooldown**: After a reminder is sent or a vote is marked, the bot waits for the cooldown period before sending another reminder. An ignored reminder is therefore repeated every cooldown until the user votes
-5. **Delivery**: Reminders are sent via DM or as a channel ping, depending on user preference (falls back to DM if the channel fails). After 3 consecutive failed deliveries, the subscription is paused and `/status` explains how to resume it
-6. **Vote Tracking**: Votes are recorded with the **I voted** button, or automatically through the **Vote now** link if `PUBLIC_BASE_URL` is configured
+## Data and backups
 
-## Docker
+Data lives in the `bot_data` volume (`/app/data` in the container):
+- `config.json`: voting sites and settings
+- `subscriptions.json`: subscriptions
 
-### Development
+Every write is atomic, and the previous version is kept as `.bak`. If a file is corrupted, the bot restores it from the copy; otherwise it refuses to start rather than overwrite your data.
 
-Use `docker-compose-dev.yml` to build the image from the local sources.
-
-Run the unit tests with `npm test` and the linter with `npm run lint`.
-
-### Production
-
-The `docker-compose.yml` file is configured for production use with:
-- Automatic command deployment on startup
-- Volume persistence for data
-- Docker health check on `/health`
-- Clean shutdown on `docker stop` (pending changes are saved)
-- Port mapping for the HTTP server
-
-The container runs as the unprivileged `node` user. Images published before this change ran as root: if your `bot_data` volume comes from such an image, give it to the `node` user once (the bot refuses to start and shows this command otherwise):
+To make a backup:
 
 ```bash
-docker compose run --rm --user root bot chown -R node:node /app/data
+docker compose cp bot:/app/data ./data-backup
 ```
-
-### Docker image (CI)
-
-The GitHub Actions workflow `.github/workflows/docker.yml` runs the tests on Node.js 26, then builds the image for `linux/amd64` and `linux/arm64`:
-- push to `main` → publishes `ghcr.io/mrddream/remindervotebot:latest` (and a `sha-…` tag)
-- `vX.Y.Z` tag → also publishes `X.Y.Z` and `X.Y`
-- pull request → tests and builds the image without publishing it
-
-To update a server: `docker compose pull && docker compose up -d`.
-
-## Project Structure
-
-```
-ReminderVoteBot/
-├── src/
-│   ├── index.js          # Main bot logic
-│   ├── config.js         # Configuration management
-│   ├── storage.js        # Subscription storage
-│   ├── schedule.js       # Reminder scheduling rules (time windows, cooldown, snooze)
-│   ├── jsonFile.js       # Atomic JSON writes with .bak backup
-│   ├── token.js          # Signed /v vote links
-│   ├── voteUrl.js        # Vote URL validation and ids
-│   ├── constants.js      # Values shared with deploy-commands.js
-│   ├── paths.js          # Data directory
-│   └── deploy-commands.js # Discord command deployment
-├── data/                 # Data directory (created at runtime)
-│   ├── config.json       # Bot configuration
-│   └── subscriptions.json # User subscriptions
-├── test/                 # Unit tests (npm test)
-├── Dockerfile            # Docker image definition
-├── docker-compose.yml    # Production Docker Compose
-├── docker-compose-dev.yml # Development Docker Compose
-├── package.json          # Node.js dependencies
-└── README.md            # This file
-```
-
-## Features in Detail
-
-### Time Windows
-- Users pick a preset or type any start and end time (`HH:MM`, `9h`, `21h30`…)
-- Supports overnight windows (e.g., 22:00-06:00)
-- Timezone-aware: each subscription has its own timezone (default: `DEFAULT_TZ`)
-
-### Cooldown System
-- Each vote server can have its own cooldown period
-- Default cooldown is 2 hours (120 minutes)
-- Supported values: 60, 120, 180, 240, 720, 1440 minutes
-- Timer resets when the user clicks "I voted" (or "Vote now" when `PUBLIC_BASE_URL` is set)
-
-### Multiple Vote Servers
-- Administrators can add multiple vote servers
-- Each server has its own URL, cooldown, and optional ping channel
-- Users can subscribe to different servers with different configurations
-
-### Vote Redirect Service
-If `PUBLIC_BASE_URL` is configured:
-- The bot provides a secure redirect service at `/v?t=<token>`
-- Tokens are signed with HMAC-SHA256 (`MARK_SECRET`), identify the subscription so the vote is recorded on the right server, and expire after 7 days
-- In channel ping mode, the **Vote now** button gives the subscriber their personal link privately, so other members cannot vote in their place
-- Automatically tracks when users vote and updates the reminder message
-- Falls back to direct vote URL if not configured
 
 ## Troubleshooting
 
-### Bot not responding
-- Check that the bot token is correct
-- Verify the bot has necessary permissions (Send Messages, Direct Messages)
-- Check bot logs for errors
-
-### Reminders not being sent
-- Verify the time window is correctly configured
-- Check that the cooldown period has elapsed (`/status` shows the next reminder)
-- Ensure the bot can send DMs or access the configured channel; a subscription paused after failed deliveries can be resumed from `/status`
-- Check timezone settings
-
-### Commands not appearing
-- Run `npm run deploy:commands` to deploy commands
-- Commands only exist on the `GUILD_ID` server (deployment also removes global commands left by older versions)
-- `/addvote` and `/listvote` require the "Manage Server" permission on that server
+| Problem | What to check |
+|---------|---------------|
+| The container stops on startup | `docker compose logs bot`: the message names the missing or invalid variable, or the `chown` command to run. |
+| Commands do not show up | `GUILD_ID` is your server's ID, and the bot was invited with the `applications.commands` scope. Restart the container: commands are registered on every start. |
+| `/addvote` or `/listvote` refused | You need the “Manage Server” permission on the `GUILD_ID` server. |
+| No reminder | `/status` shows the next reminder. Check the time window and timezone, and that the player accepts DMs from server members. A paused subscription is resumed from `/status`. |
+| One-click voting does not work | `PUBLIC_BASE_URL` must point to the bot over HTTPS (`https://your-domain/health` must answer `{"ok":true}`). |
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT licensed, see [LICENSE](LICENSE).
 
-## Contributing
+## Contributing and support
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-For issues, questions, or feature requests, please open an issue on GitHub.
+Contributions are welcome: open an issue or a pull request on GitHub.
 
 ---
 
 Made with ❤️ by MrDDream
-

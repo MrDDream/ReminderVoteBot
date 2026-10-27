@@ -174,6 +174,15 @@ Le fichier `docker-compose.yml` est configuré pour une utilisation en productio
 - Point de contrôle de santé à `/health`
 - Mappage de port pour le serveur HTTP
 
+### Image Docker (CI)
+
+Le workflow GitHub Actions `.github/workflows/docker.yml` lance les tests sous Node.js 26, puis construit l'image pour `linux/amd64` et `linux/arm64` :
+- push sur `main` → publie `ghcr.io/mrddream/remindervotebot:latest` (et un tag `sha-…`)
+- tag `vX.Y.Z` → publie aussi `X.Y.Z` et `X.Y`
+- pull request → lance les tests et construit l'image sans la publier
+
+Pour mettre à jour un serveur : `docker compose pull && docker compose up -d`.
+
 ## Structure du projet
 
 ```

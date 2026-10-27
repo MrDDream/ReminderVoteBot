@@ -88,16 +88,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#v}"
-          awk -v ver="$version" '
-            index($0, "## [" ver "]") == 1 { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "No section for $version in CHANGELOG.md" >&2
-            exit 1
-          fi
+          .github/scripts/release-notes.sh "$TAG" > release-notes.md
           # A release created from the GitHub UI already exists: only fill in its notes.
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --notes-file release-notes.md

@@ -35,11 +35,11 @@ cd ReminderVoteBot
 ```env
 DISCORD_TOKEN=votre_token_de_bot_discord
 CLIENT_ID=votre_client_id
-GUILD_ID=votre_guild_id  # Optionnel, pour les commandes spécifiques au serveur
+GUILD_ID=votre_guild_id  # Obligatoire : le serveur Discord du bot
 DEFAULT_TZ=Europe/Paris  # Fuseau horaire par défaut
 BOT_LANG=fr  # ou 'en' pour l'anglais
 PUBLIC_BASE_URL=https://votre-domaine.com  # Optionnel, pour la redirection de vote
-MARK_SECRET=votre_cle_secrete  # Optionnel, pour les tokens de vote sécurisés
+MARK_SECRET=au_moins_32_caracteres_aleatoires  # Obligatoire avec PUBLIC_BASE_URL (openssl rand -hex 32)
 PORT=3000  # Optionnel, par défaut 3000
 ```
 
@@ -81,13 +81,12 @@ npm start
 |----------|--------|-------------|------------|
 | `DISCORD_TOKEN` | Oui | Token de votre bot Discord | - |
 | `CLIENT_ID` | Oui | ID client de votre application Discord | - |
-| `GUILD_ID` | Non | ID du serveur pour les commandes spécifiques (déploiement plus rapide) | - |
+| `GUILD_ID` | Oui | ID du serveur Discord du bot : les commandes y sont déployées uniquement, et les commandes admin ne fonctionnent que là | - |
 | `DEFAULT_TZ` | Non | Fuseau horaire par défaut pour les rappels | `Europe/Paris` |
 | `BOT_LANG` | Non | Langue du bot (`en` ou `fr`) | `fr` |
 | `PUBLIC_BASE_URL` | Non | URL de base pour le service de redirection de vote | - |
-| `MARK_SECRET` | Non | Clé secrète pour la signature des tokens de vote | - |
+| `MARK_SECRET` | Avec `PUBLIC_BASE_URL` | Clé secrète (32 caractères minimum) pour signer les liens de vote ; le bot refuse de démarrer sans elle si `PUBLIC_BASE_URL` est défini | - |
 | `PORT` | Non | Port du serveur HTTP | `3000` |
-| `DEFAULT_VOTE_URL` | Non | Legacy : URL de vote par défaut (déprécié, utilisez `/addvote`) | - |
 
 ### Stockage des données
 
@@ -140,14 +139,16 @@ Ajouter une nouvelle URL de vote. Nécessite la permission "Gérer le serveur".
 
 Un formulaire demande ensuite :
 - **Nom** : Nom d'affichage pour le serveur de vote
-- **URL** : L'URL de vote. Placez `{pseudo}` à l'endroit où doit aller le pseudo de l'utilisateur (ex. `https://site/vote/{pseudo}`) ; sinon, `?pseudo=<pseudo>` est ajouté à l'URL
+- **URL** : L'URL de vote (`https://`, 400 caractères maximum). Placez `{pseudo}` à l'endroit où doit aller le pseudo de l'utilisateur (ex. `https://site/vote/{pseudo}`) ; sinon, `?pseudo=<pseudo>` est ajouté à l'URL
+
+25 URLs de vote au maximum peuvent être configurées.
 
 #### `/listvote`
 Lister et gérer les URLs de vote existantes. Vous pouvez :
 - Voir tous les serveurs de vote configurés et leur nombre d'abonnés
 - Changer le délai et le salon de ping directement depuis des menus
 - Modifier le nom et l'URL
-- Supprimer des serveurs de vote
+- Supprimer des serveurs de vote (leurs abonnements sont aussi supprimés)
 
 ## Fonctionnement
 
@@ -164,15 +165,22 @@ Lister et gérer les URLs de vote existantes. Vous pouvez :
 
 Utilisez `docker-compose-dev.yml` pour construire l'image à partir des sources locales.
 
-Lancez les tests unitaires avec `npm test`.
+Lancez les tests unitaires avec `npm test` et le linter avec `npm run lint`.
 
 ### Production
 
 Le fichier `docker-compose.yml` est configuré pour une utilisation en production avec :
 - Déploiement automatique des commandes au démarrage
 - Persistance des volumes pour les données
-- Point de contrôle de santé à `/health`
+- Contrôle de santé Docker sur `/health`
+- Arrêt propre sur `docker stop` (les modifications en attente sont enregistrées)
 - Mappage de port pour le serveur HTTP
+
+Le conteneur tourne avec l'utilisateur non privilégié `node`. Les images publiées avant ce changement tournaient en root : si votre volume `bot_data` vient d'une telle image, donnez-le une fois à l'utilisateur `node` (sinon le bot refuse de démarrer et affiche cette commande) :
+
+```bash
+docker compose run --rm --user root bot chown -R node:node /app/data
+```
 
 ### Image Docker (CI)
 
@@ -193,6 +201,10 @@ ReminderVoteBot/
 │   ├── storage.js        # Stockage des abonnements
 │   ├── schedule.js       # Règles de planification (fenêtres horaires, cooldown, report)
 │   ├── jsonFile.js       # Écriture JSON atomique avec sauvegarde .bak
+│   ├── token.js          # Liens de vote /v signés
+│   ├── voteUrl.js        # Validation et identifiants des URLs de vote
+│   ├── constants.js      # Valeurs partagées avec deploy-commands.js
+│   ├── paths.js          # Dossier des données
 │   └── deploy-commands.js # Déploiement des commandes Discord
 ├── data/                 # Répertoire de données (créé à l'exécution)
 │   ├── config.json       # Configuration du bot
@@ -226,7 +238,8 @@ ReminderVoteBot/
 ### Service de redirection de vote
 Si `PUBLIC_BASE_URL` est configuré :
 - Le bot fournit un service de redirection sécurisé à `/v?t=<token>`
-- Les tokens sont signés avec HMAC-SHA256 et identifient l'abonnement, pour que le vote soit enregistré sur le bon serveur
+- Les tokens sont signés avec HMAC-SHA256 (`MARK_SECRET`), identifient l'abonnement pour que le vote soit enregistré sur le bon serveur, et expirent après 7 jours
+- En mode ping salon, le bouton **Voter maintenant** donne à l'abonné son lien personnel en privé : les autres membres ne peuvent pas voter à sa place
 - Suit automatiquement quand les utilisateurs votent et met à jour le message de rappel
 - Revient à l'URL de vote directe si non configuré
 
@@ -245,8 +258,8 @@ Si `PUBLIC_BASE_URL` est configuré :
 
 ### Les commandes n'apparaissent pas
 - Exécutez `npm run deploy:commands` pour déployer les commandes
-- Attendez jusqu'à 1 heure pour que les commandes globales se propagent
-- Utilisez `GUILD_ID` pour un déploiement instantané des commandes spécifiques au serveur
+- Les commandes n'existent que sur le serveur `GUILD_ID` (le déploiement supprime aussi les commandes globales des anciennes versions)
+- `/addvote` et `/listvote` demandent la permission « Gérer le serveur » sur ce serveur
 
 ## Licence
 

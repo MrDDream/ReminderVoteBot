@@ -1,10 +1,10 @@
 import './env.js';
 import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
+import { BOT_LANG, COOLDOWN_CHOICES } from './constants.js';
 
 const clientId = process.env.CLIENT_ID;
 const guildId = process.env.GUILD_ID;
 const token = process.env.DISCORD_TOKEN;
-const BOT_LANG = (process.env.BOT_LANG || 'fr').trim().toLowerCase() === 'en' ? 'en' : 'fr';
 
 const DESCRIPTIONS = {
 	subscribe: {
@@ -36,15 +36,6 @@ const DESCRIPTIONS = {
 		en: 'Channel where subscribers are pinged in ping mode (optional).'
 	}
 };
-
-const COOLDOWN_CHOICES = [
-	{ minutes: 60, fr: '1 heure', en: '1 hour' },
-	{ minutes: 120, fr: '2 heures', en: '2 hours' },
-	{ minutes: 180, fr: '3 heures', en: '3 hours' },
-	{ minutes: 240, fr: '4 heures', en: '4 hours' },
-	{ minutes: 720, fr: '12 heures', en: '12 hours' },
-	{ minutes: 1440, fr: '24 heures', en: '24 hours' }
-];
 
 const commands = [
 	new SlashCommandBuilder()
@@ -81,18 +72,16 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(token);
 
 async function main() {
-	if (!clientId || !token) {
-		console.error('CLIENT_ID ou DISCORD_TOKEN manquant(s) dans .env');
+	if (!clientId || !token || !guildId) {
+		console.error('CLIENT_ID, DISCORD_TOKEN ou GUILD_ID manquant(s) dans .env');
 		process.exit(1);
 	}
 	try {
-		if (guildId) {
-			await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-			console.log('Commandes guild deployeees.');
-		} else {
-			await rest.put(Routes.applicationCommands(clientId), { body: commands });
-			console.log('Commandes globales deployeees (propagation jusqu a 1h).');
-		}
+		await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+		// The bot serves a single server: remove global commands left by older versions,
+		// otherwise they would stay usable from any server the bot is in.
+		await rest.put(Routes.applicationCommands(clientId), { body: [] });
+		console.log('Commandes deployees sur le serveur et commandes globales supprimees.');
 	} catch (e) {
 		console.error(e);
 		process.exit(1);

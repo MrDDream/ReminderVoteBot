@@ -1,20 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
 import { readJson, writeJsonAtomic } from './jsonFile.js';
+import { isValidTimezone } from './schedule.js';
+import { dataDir, ensureDataDir } from './paths.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dataDir = path.join(__dirname, '..', 'data');
 const subsPath = path.join(dataDir, 'subscriptions.json');
 const legacySubsPath = path.join(dataDir, 'subscribers.json');
-
-function ensureDataDir() {
-	if (!fs.existsSync(dataDir)) {
-		fs.mkdirSync(dataDir, { recursive: true });
-	}
-}
 
 function normalizeWindow(window) {
 	if (!window || typeof window !== 'object') return null;
@@ -32,9 +24,8 @@ function normalizeSubscription(raw, fallbackPrefix, index) {
 		window: normalizeWindow(raw.window),
 		mode: raw.mode === 'channel' ? 'channel' : 'dm',
 		channelId: raw.channelId || null,
-		timezone: raw.timezone || raw.tz || null,
+		timezone: isValidTimezone(raw.timezone || raw.tz) ? (raw.timezone || raw.tz) : null,
 		guildId: raw.guildId || null,
-		lastKnownDisplayName: raw.lastKnownDisplayName || null,
 		lastVotedAt: typeof raw.lastVotedAt === 'number' ? raw.lastVotedAt : null,
 		lastReminderAt: typeof raw.lastReminderAt === 'number' ? raw.lastReminderAt : null,
 		snoozeUntil: typeof raw.snoozeUntil === 'number' ? raw.snoozeUntil : null,
@@ -80,7 +71,8 @@ export function loadSubscriptions() {
 		}
 		migrated.push(normalizeSubscription(entry, 'sub', idx++));
 	}
-	if (migrated.length !== data.length) {
+	// Persist any normalization (new ids, migrated fields) so ids stay stable across restarts.
+	if (JSON.stringify(migrated) !== JSON.stringify(data)) {
 		saveSubscriptions(migrated);
 	}
 	return migrated;
@@ -95,15 +87,6 @@ export function addSubscription(list, subscription) {
 	const record = normalizeSubscription({ ...subscription, id: subscription.id || crypto.randomUUID() }, 'sub', list.length);
 	list.push(record);
 	return record;
-}
-
-export function updateSubscription(list, id, fields = {}) {
-	const idx = list.findIndex(item => item.id === id);
-	if (idx === -1) return null;
-	const current = list[idx];
-	const updated = normalizeSubscription({ ...current, ...fields, id }, 'sub', idx);
-	list[idx] = updated;
-	return updated;
 }
 
 export function removeSubscription(list, id) {
@@ -121,8 +104,4 @@ export function removeAllSubscriptionsForUser(list, userId) {
 		}
 	}
 	return before - list.length;
-}
-
-export function getDataPaths() {
-	return { dataDir, subsPath };
 }

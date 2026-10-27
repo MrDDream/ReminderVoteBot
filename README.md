@@ -37,28 +37,39 @@ The bot ships as a ready-to-use Docker image (`linux/amd64` and `linux/arm64`): 
    (permissions: view channels, send messages, embed links)
 4. Get your **server ID**: enable *Developer Mode* in Discord settings, then right-click the server → *Copy Server ID*.
 
-### 2. Get the Docker Compose file
+### 2. Create the `docker-compose.yml` file
 
-```bash
-mkdir remindervotebot && cd remindervotebot
-curl -O https://raw.githubusercontent.com/MrDDream/ReminderVoteBot/main/docker-compose.yml
+In a dedicated folder (for example `remindervotebot/`), create this file and replace the first three values:
+
+```yaml
+services:
+  bot:
+    image: ghcr.io/mrddream/remindervotebot:latest
+    container_name: ReminderVoteBot
+    restart: unless-stopped
+    init: true
+    # Registers the slash commands on your server, then starts the bot
+    command: sh -c "node src/deploy-commands.js && exec node src/index.js"
+    environment:
+      DISCORD_TOKEN: "bot_token"
+      CLIENT_ID: "application_id"
+      GUILD_ID: "your_discord_server_id"
+      BOT_LANG: "en"
+      DEFAULT_TZ: "Europe/London"
+      # Optional: one-click voting (see below), uncomment both lines
+      # PUBLIC_BASE_URL: "https://vote.example.com"
+      # MARK_SECRET: "32+ characters, e.g. openssl rand -hex 32"
+    volumes:
+      - bot_data:/app/data
+    # Only needed for one-click voting
+    ports:
+      - "3000:3000"
+
+volumes:
+  bot_data:
 ```
 
-### 3. Create the `.env` file next to it
-
-```env
-DISCORD_TOKEN=bot_token
-CLIENT_ID=application_id
-GUILD_ID=your_discord_server_id
-BOT_LANG=en
-DEFAULT_TZ=Europe/London
-
-# Optional: one-click voting (see below). Uncomment both lines.
-# PUBLIC_BASE_URL=https://vote.example.com
-# MARK_SECRET=
-```
-
-### 4. Start
+### 3. Start
 
 ```bash
 docker compose up -d
@@ -85,7 +96,7 @@ Subscriptions and voting sites are kept in the `bot_data` Docker volume.
 By default, *Vote now* opens the voting site directly, and the player clicks *I voted* to restart their timer. To record the vote automatically:
 
 1. Make the bot reachable from the Internet on an HTTPS domain, for example with a reverse proxy (Caddy, Nginx, Traefik…) to port `3000` of the container.
-2. In `.env`, set `PUBLIC_BASE_URL` to that domain and `MARK_SECRET` to a key of at least 32 characters (`openssl rand -hex 32`).
+2. In `docker-compose.yml`, uncomment `PUBLIC_BASE_URL` with that domain and `MARK_SECRET` with a key of at least 32 characters (`openssl rand -hex 32`).
 3. Restart: `docker compose up -d`.
 
 The button then goes through a personal link, signed and valid for 7 days, that records the vote and redirects to the site. In channel mention mode, this link is sent to the player privately, so other members cannot vote in their place.
